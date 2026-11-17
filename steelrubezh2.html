@@ -1,0 +1,2441 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0a0e14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Стальной Рубеж 2">
+<title>СТАЛЬНОЙ РУБЕЖ 2</title>
+<style>
+html,body{margin:0;padding:0;background:#0a0e14;overflow:hidden;position:fixed;inset:0;
+ -webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;overscroll-behavior:none}
+#c{position:fixed;inset:0;width:100%;height:100%;touch-action:none;-webkit-user-select:none;user-select:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(() => {
+"use strict";
+/* ============================================================
+   СТАЛЬНОЙ РУБЕЖ 2 — финальная версия
+   Исправлено: фон-тайл на скорости декора (танк стоит на земле),
+   детерминированные препятствия (нет «танцующих» обломков),
+   одинарный прирост G.t, безопасное аудио (anow), очередь
+   Призрака на игровых таймерах, touch-фолбэк, пауза в фоне.
+   ============================================================ */
+const cvs=document.getElementById('c');
+const ctx=cvs.getContext('2d');
+let LW=360,LH=560,buf=null,bctx=null,SCALE=2,offX=0,offY=0;
+const G={state:'menu',t:0,score:0,best:0,wave:0,lives:3,
+ scroll:0,mission:1,spawnT:0,spawnQ:0,waveClearT:0,
+ banner:'',bannerT:0,bannerC:'#ffd23f',
+ enemies:[],bullets:[],ebullets:[],crates:[],obstacles:[],parts:[],pops:[],rings:[],
+ obsT:2.5,streak:0,
+ shake:0,flash:0,flashC:'255,120,120',
+ boss:null,bossName:'',bossWarn:0,
+ P:{x:180,y:0,tx:180,ty:0,cool:0,mg:0,rk:0,gun:1,armor:0,aCd:0,inv:0,star:0,rec:0,aim:-1.57,mgSide:false},
+ overBtn:null,muted:false};
+try{G.best=parseInt(localStorage.getItem('steelBest2')||'0',10)||0;}catch(e){}
+
+function resize(){
+ const w=window.innerWidth,h=window.innerHeight;
+ const dpr=Math.min(window.devicePixelRatio||1,2);
+ cvs.width=Math.round(w*dpr);cvs.height=Math.round(h*dpr);
+ cvs.style.width=w+'px';cvs.style.height=h+'px';
+ LW=360;
+ LH=Math.max(360,Math.min(720,Math.round(LW*h/Math.max(1,w))));
+ SCALE=Math.min(cvs.width/LW,cvs.height/LH);
+ offX=(cvs.width-LW*SCALE)/2;
+ offY=(cvs.height-LH*SCALE)/2;
+ buf=document.createElement('canvas');
+ buf.width=Math.round(LW*SCALE);buf.height=Math.round(LH*SCALE);
+ bctx=buf.getContext('2d');
+ terrainBuf=null;terrainM=-1; // пересобрать тайл под новый размер
+}
+window.addEventListener('resize',resize);
+window.addEventListener('orientationchange',function(){setTimeout(resize,300);});
+
+/* ---------- УТИЛИТЫ ---------- */
+function clamp(v,a,b){return v<a?a:v>b?b:v;}
+function rnd(a,b){return a+Math.random()*(b-a);}
+function fmt(n){return String(n).replace(/\B(?=(\d{3})+(?!\d))/g,' ');}
+function anow(){return AC?AC.currentTime:0;}
+function rr(c,x,y,w,h,r){
+ c.beginPath();c.moveTo(x+r,y);
+ c.arcTo(x+w,y,x+w,y+h,r);c.arcTo(x+w,y+h,x,y+h,r);
+ c.arcTo(x,y+h,x,y,r);c.arcTo(x,y,x+w,y,r);c.closePath();
+}
+function drawText(s,x,y,sc,color,align){
+ s=String(s).toUpperCase();
+ const size=Math.round(9*sc);
+ bctx.font='bold '+size+'px system-ui,sans-serif';
+ bctx.textBaseline='top';
+ const w=bctx.measureText(s).width;
+ let xx=x;
+ if(align==='center')xx=x-w/2;else if(align==='right')xx=x-w;
+ xx=Math.round(xx);y=Math.round(y);
+ bctx.lineJoin='round';
+ bctx.lineWidth=Math.max(2,size/4.2);
+ bctx.strokeStyle='rgba(6,8,4,0.94)';
+ bctx.strokeText(s,xx,y);
+ bctx.fillStyle=color;bctx.fillText(s,xx,y);
+}
+function pop(t,x,y,c,sc){G.pops.push({t:t,x:x,y:y,c:c||'#ffe9a8',sc:sc||1,life:1.2,vy:-30});}
+function burst(x,y,c,n,pw){
+ for(let i=0;i<(n||12);i++){
+  const a=Math.random()*6.28,d=rnd(20,110)*(pw||1);
+  G.parts.push({x:x,y:y,vx:Math.cos(a)*d,vy:Math.sin(a)*d,
+   life:rnd(0.3,0.8),c:c,s:1+Math.floor(Math.random()*3)});
+ }
+}
+function smoke(x,y,n){
+ for(let i=0;i<(n||5);i++)
+  G.parts.push({x:x+rnd(-6,6),y:y+rnd(-6,6),vx:rnd(-14,14),vy:rnd(-30,-10),
+   life:rnd(0.5,1.1),c:'#4a4a44',s:2+Math.floor(Math.random()*2)});
+}
+function ring(x,y,r,c){G.rings.push({x:x,y:y,r:r,max:r+34,life:1,c:c||'255,190,90'});}
+function explode(x,y,big){
+ const n=big?42:16;
+ burst(x,y,'#ffd23f',n,big?1.4:0.9);
+ burst(x,y,'#ff7a2a',n>>1,big?1.1:0.8);
+ burst(x,y,'#3a3a34',n>>1,0.6);
+ smoke(x,y,big?8:3);
+ ring(x,y,big?22:7,big?'255,160,70':'255,190,90');
+ G.shake=Math.min(14,(big?12:4)+(G.shake||0));
+}
+
+/* ============================================================
+   АУДИО-ДВИЖОК: ПОЛИФОНИЯ + 64 ШАГА
+   ============================================================ */
+let AC=null, master=null, noiseBuf=null, mStep=0, mNext=0;
+let delayNode=null, delayFeedback=null;
+
+function initAudio(){
+ if(AC)return;
+ try{
+  AC=new (window.AudioContext||window.webkitAudioContext)();
+  master=AC.createGain();
+  master.gain.value=0.35;
+  master.connect(AC.destination);
+  delayNode=AC.createDelay(1.0);
+  delayFeedback=AC.createGain();
+  delayFeedback.gain.value=0.28;
+  delayNode.connect(delayFeedback);
+  delayFeedback.connect(delayNode);
+  delayNode.connect(master);
+  noiseBuf=AC.createBuffer(1,Math.floor(AC.sampleRate*0.5),AC.sampleRate);
+  const d=noiseBuf.getChannelData(0);
+  for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;
+  mNext=AC.currentTime+0.1;
+  setInterval(musicTick,50);
+ }catch(e){AC=null;}
+}
+
+function midi(m){return 440*Math.pow(2,(m-69)/12);}
+
+function tone(f,t0,dur,type,vol,slide,dest){
+ if(!AC||G.muted)return;
+ try{
+  const o=AC.createOscillator(),g=AC.createGain();
+  o.type=type;o.frequency.setValueAtTime(f,t0);
+  if(slide)o.frequency.linearRampToValueAtTime(slide,t0+dur);
+  g.gain.setValueAtTime(vol,t0);
+  g.gain.exponentialRampToValueAtTime(0.0001,t0+dur);
+  o.connect(g);g.connect(dest||master);
+  o.start(t0);o.stop(t0+dur+0.03);
+ }catch(e){}
+}
+
+function noiseHit(t0,dur,vol,rate,hp,dest){
+ if(!AC||G.muted||!noiseBuf)return;
+ try{
+  const s=AC.createBufferSource(),g=AC.createGain();
+  s.buffer=noiseBuf;s.playbackRate.value=rate||1;
+  g.gain.setValueAtTime(vol,t0);
+  g.gain.exponentialRampToValueAtTime(0.001,t0+dur);
+  s.connect(g);
+  if(hp){const f=AC.createBiquadFilter();f.type='highpass';f.frequency.value=hp;g.connect(f);f.connect(dest||master);}
+  else g.connect(dest||master);
+  s.start(t0);s.stop(t0+dur+0.02);
+ }catch(e){}
+}
+
+/* ============================================================
+   МУЗЫКА: 3 ТЕМЫ МИССИЙ + БОСС-ТЕМА, 64 ШАГА
+   ============================================================ */
+const MEL_1=[69,0,72,0,74,72,0,69, 67,0,65,0,64,0,0,0,
+             69,0,72,0,74,76,0,77, 76,0,74,0,72,0,0,0,
+             74,0,72,0,69,0,67,0,   69,0,72,0,74,0,76,0,
+             77,0,76,0,74,0,72,0,   69,0,0,0,0,0,0,0];
+const BASS_1=[45,0,45,45,0,45,0,45, 43,0,43,43,0,43,0,43,
+              41,0,41,41,0,41,0,41, 43,0,43,43,0,43,0,43,
+              45,0,45,45,0,45,0,45, 43,0,43,43,0,43,0,43,
+              41,0,41,0,43,0,43,0,   45,0,0,0,0,0,0,0];
+const CHORDS_1=[[57,60,64],[55,59,62],[53,57,60],[55,59,62],
+                [57,60,64],[55,59,62],[53,57,60],[55,59,62]];
+const ARP_1=[69,72,76,72,69,72,76,72, 67,71,74,71,67,71,74,71,
+             65,69,72,69,65,69,72,69, 67,71,74,71,67,71,74,71];
+
+const MEL_2=[74,0,77,0,79,77,0,74, 72,0,70,0,69,0,0,0,
+             74,0,77,0,79,81,0,82, 81,0,79,0,77,0,0,0,
+             79,0,77,0,74,0,72,0,   74,0,77,0,79,0,81,0,
+             82,0,81,0,79,0,77,0,   74,0,0,0,0,0,0,0];
+const BASS_2=[38,0,38,38,0,38,0,38, 36,0,36,36,0,36,0,36,
+              34,0,34,34,0,34,0,34, 36,0,36,36,0,36,0,36,
+              38,0,38,38,0,38,0,38, 36,0,36,36,0,36,0,36,
+              34,0,34,0,36,0,36,0,   38,0,0,0,0,0,0,0];
+const CHORDS_2=[[50,53,57],[48,51,55],[46,50,53],[48,51,55],
+                [50,53,57],[48,51,55],[46,50,53],[48,51,55]];
+const ARP_2=[62,65,69,65,62,65,69,65, 60,63,67,63,60,63,67,63,
+             58,62,65,62,58,62,65,62, 60,63,67,63,60,63,67,63];
+
+const MEL_3=[76,0,79,0,81,79,0,76, 74,0,72,0,71,0,0,0,
+             76,0,79,0,81,83,0,84, 83,0,81,0,79,0,0,0,
+             81,0,79,0,76,0,74,0,   76,0,79,0,81,0,83,0,
+             84,0,83,0,81,0,79,0,   76,0,0,0,0,0,0,0];
+const BASS_3=[40,0,40,40,0,40,0,40, 38,0,38,38,0,38,0,38,
+              36,0,36,36,0,36,0,36, 38,0,38,38,0,38,0,38,
+              40,0,40,40,0,40,0,40, 38,0,38,38,0,38,0,38,
+              36,0,36,0,38,0,38,0,   40,0,0,0,0,0,0,0];
+const CHORDS_3=[[52,55,59],[50,53,57],[48,52,55],[50,53,57],
+                [52,55,59],[50,53,57],[48,52,55],[50,53,57]];
+const ARP_3=[64,67,71,67,64,67,71,67, 62,65,69,65,62,65,69,65,
+             60,64,67,64,60,64,67,64, 62,65,69,65,62,65,69,65];
+
+const MEL_B1=[74,0,74,0,77,79,77,0,74,0,74,77,79,0,81,0,
+              79,77,75,0,74,0,72,0,74,0,0,0,70,0,0,0,
+              74,0,77,0,79,81,79,0,77,0,74,0,72,0,0,0,
+              70,0,72,0,74,0,77,0,79,0,0,0,0,0,0,0];
+const BASS_B1=[38,38,0,38,38,0,38,38,34,34,0,34,34,0,34,34,
+               36,36,0,36,36,0,36,36,38,0,38,0,40,0,40,0,
+               38,38,0,38,38,0,38,38,36,36,0,36,36,0,36,36,
+               34,34,0,34,34,0,34,34,38,0,0,0,0,0,0,0];
+const CHORDS_B=[[50,53,57],[46,50,53],[48,52,55],[50,53,57],
+                [50,53,57],[46,50,53],[48,52,55],[50,53,57]];
+
+function getTheme(){
+ const m=(G.mission-1)%3;
+ if(m===0) return {mel:MEL_1,bass:BASS_1,chords:CHORDS_1,arp:ARP_1};
+ if(m===1) return {mel:MEL_2,bass:BASS_2,chords:CHORDS_2,arp:ARP_2};
+ return {mel:MEL_3,bass:BASS_3,chords:CHORDS_3,arp:ARP_3};
+}
+
+function musicTick(){
+ if(!AC||G.state!=='play')return;
+ if(document.hidden){mNext=AC.currentTime+0.1;return;}
+ const boss=!!G.boss;
+ const step=boss?0.14:0.18;
+ const theme=boss?{mel:MEL_B1,bass:BASS_B1,chords:CHORDS_B,arp:ARP_1}:getTheme();
+
+ while(mNext<AC.currentTime+0.3){
+  const i=mStep%64;
+  if(theme.mel[i]){
+   tone(midi(theme.mel[i]),mNext,step*1.1,'sawtooth',0.024,null,delayNode);
+   tone(midi(theme.mel[i]+12),mNext+step*0.5,step*0.5,'triangle',0.008);
+  }
+  if(theme.bass[i])tone(midi(theme.bass[i]),mNext,step*1.4,'triangle',0.06);
+  if(i%8===0){
+   const ch=theme.chords[Math.floor(i/8)%8];
+   for(const n of ch){
+    tone(midi(n),mNext,step*8.5,'sine',0.014);
+    tone(midi(n-12),mNext,step*8.5,'sine',0.018);
+   }
+  }
+  const arpIdx=i%32;
+  if(theme.arp[arpIdx])tone(midi(theme.arp[arpIdx]+12),mNext,step*0.4,'triangle',0.008);
+  if(i%8===0)noiseHit(mNext,0.12,0.08,0.25);
+  if(i%8===4)noiseHit(mNext,0.07,0.06,2.2,900);
+  if(boss&&i%8===6)noiseHit(mNext,0.05,0.05,2.2,900);
+  if(i%4===2)noiseHit(mNext,0.03,0.02,6,5000);
+  if(i%16===12)noiseHit(mNext,0.2,0.04,0.3);
+  if(boss&&i%32===0)noiseHit(mNext,0.4,0.06,0.15);
+  mStep++;mNext+=step;
+ }
+}
+
+/* ---------- ЗВУКОВЫЕ ЭФФЕКТЫ ---------- */
+const sShot=()=>{
+ if(!AC)return;
+ const t=AC.currentTime;
+ tone(140,t,0.1,'square',0.07,60);
+ tone(200,t,0.06,'sawtooth',0.03,100);
+ noiseHit(t,0.08,0.06,0.8);
+};
+const sMg=()=>{ if(!AC)return; tone(900,AC.currentTime,0.035,'square',0.022,500); };
+const sRk=()=>{
+ if(!AC)return;
+ const t=AC.currentTime;
+ noiseHit(t,0.3,0.06,0.9);
+ tone(300,t,0.25,'sawtooth',0.045,700,null,delayNode);
+};
+const sHit=()=>{ if(!AC)return; tone(260,AC.currentTime,0.05,'square',0.04,140); };
+const sCrush=()=>{
+ if(!AC)return;
+ const t=AC.currentTime;
+ tone(90,t,0.12,'sawtooth',0.05,40);
+ noiseHit(t,0.15,0.06,0.6);
+};
+const sBoom=()=>{
+ if(!AC||G.muted)return;
+ const t=AC.currentTime;
+ noiseHit(t,0.35,0.14,0.4);
+ tone(120,t,0.3,'sawtooth',0.09,40,null,delayNode);
+ tone(60,t+0.02,0.4,'sine',0.06,30);
+ noiseHit(t+0.1,0.25,0.08,0.6);
+};
+const sBoomBig=()=>{
+ if(!AC||G.muted)return;
+ const t=AC.currentTime;
+ noiseHit(t,0.8,0.22,0.3);
+ tone(80,t,0.7,'sawtooth',0.14,25,null,delayNode);
+ tone(45,t+0.05,0.9,'sine',0.1,20);
+ noiseHit(t+0.3,0.6,0.15,0.4);
+ noiseHit(t+0.6,0.4,0.1,0.5);
+};
+const sPow=()=>{
+ if(!AC||G.muted)return;
+ const t=AC.currentTime;
+ [72,76,79,84,88].forEach((m,i)=>tone(midi(m),t+i*0.06,0.12,'triangle',0.09));
+};
+const sAlarm=()=>{
+ if(!AC||G.muted)return;
+ const t=AC.currentTime;
+ for(let i=0;i<3;i++){
+  tone(660,t+i*0.42,0.2,'sawtooth',0.07);
+  tone(440,t+i*0.42+0.2,0.2,'sawtooth',0.07);
+ }
+};
+const sHurt=()=>{
+ if(!AC||G.muted)return;
+ const t=AC.currentTime;
+ noiseHit(t,0.3,0.16,0.5);
+ tone(180,t,0.25,'square',0.1,60);
+ tone(120,t+0.05,0.3,'sawtooth',0.06,40,null,delayNode);
+};
+const sUp=()=>{
+ if(!AC||G.muted)return;
+ const t=AC.currentTime;
+ [79,84,88,91].forEach((m,i)=>tone(midi(m),t+i*0.05,0.12,'square',0.09));
+ tone(1200,t+0.2,0.15,'sine',0.05);
+};
+// ===== ЧАСТЬ 1 КОНЕЦ =====
+/* ============================================================
+   МИССИИ: ПЕРЕДОВАЯ · РУИНЫ · ВУЛКАН
+   ============================================================ */
+function missionName(m){
+ return ['ПЕРЕДОВАЯ','РУИНЫ','ВУЛКАН'][(m-1)%3];
+}
+
+function reset(){
+ G.t=0;G.score=0;G.wave=0;G.lives=3;G.scroll=0;G.mission=1;
+ G.enemies=[];G.bullets=[];G.ebullets=[];G.crates=[];G.obstacles=[];
+ G.parts=[];G.pops=[];G.rings=[];
+ G.obsT=2.5;G.streak=0;
+ G.shake=0;G.flash=0;G.boss=null;G.bossName='';G.bossWarn=0;
+ G.spawnT=0;G.spawnQ=0;G.waveClearT=0;
+ G.P.x=LW/2;G.P.y=LH-80;G.P.tx=LW/2;G.P.ty=LH-80;
+ G.P.cool=0;G.P.mg=0;G.P.rk=0;G.P.gun=1;G.P.armor=0;
+ G.P.aCd=0;G.P.inv=2;G.P.star=0;G.P.rec=0;
+ G.banner='';G.bannerT=0;
+ mStep=0;
+ nextWave();
+}
+
+function nextWave(){
+ G.wave++;
+ const m=Math.ceil(G.wave/5);
+ if(G.wave%5===0){
+  const names=['СТАЛЬНОЙ ГРОМ','ОСА','КУЗНЕЦ','ПРИЗРАК','МАМОНТ','КРЕМЕНЬ'];
+  const nm=names[(Math.floor((G.wave/5)-1))%names.length];
+  G.bossName=nm;
+  G.bossWarn=2.2;sAlarm();
+  G.banner='!! БОСС ЗОНЫ: '+nm+' !!';G.bannerT=2.2;G.bannerC='#ff6a6a';
+  G.spawnQ=0;
+  G.waveClearT=0;
+ }else{
+  if(m!==G.mission){
+   G.mission=m;
+   G.banner='МИССИЯ '+((m-1)%3+1)+': '+missionName(m);
+   G.bannerT=2.6;G.bannerC='#ffd23f';
+  }else{
+   G.banner='ВОЛНА '+G.wave;G.bannerT=1.6;G.bannerC='#cfe8ff';
+  }
+  G.spawnQ=Math.min(24,9+G.wave*2);
+  G.spawnT=0.7;
+  for(let i=0;i<2;i++)
+   G.crates.push({x:rnd(30,LW-30),y:-30-i*60,k:crateKind(),ph:Math.random()*6.28});
+ }
+}
+
+function crateKind(){
+ const pool=[];
+ if(G.P.gun<2)pool.push('g','g','g');
+ if(G.P.gun<3)pool.push('m','m');
+ if(G.P.gun<4)pool.push('r');
+ if(G.P.gun<5)pool.push('h');
+ if(G.P.gun<6)pool.push('L');
+ if(G.P.armor<5)pool.push('a','a','a');
+ pool.push('s','$','$','+');
+ return pool[Math.floor(Math.random()*pool.length)];
+}
+
+/* ============================================================
+   СПАВН ВРАГОВ: 6 ТИПОВ
+   ============================================================ */
+function spawnEnemy(){
+ const mm=(G.mission-1)%3;
+ const lvl=G.mission;
+ const r=Math.random();
+ const hpM=1+0.35*(lvl-1);
+ const ftM=Math.max(0.55,1-0.1*(lvl-1));
+ const vM=1+0.12*(lvl-1);
+
+ if(G.wave%5===0&&G.boss)return;
+
+ if(mm>=1&&r<0.10){
+  G.enemies.push({k:'sniper',x:rnd(40,LW-40),y:-34,vy:20*vM,vx:0,
+   ph:Math.random()*6.28,hp:Math.round(3*hpM),r:13,fl:0,t:0,
+   ft:rnd(3.5,5)*ftM,aimT:0,aiming:false});
+  return;
+ }
+ if(mm>=1&&r<0.18){
+  G.enemies.push({k:'shield',x:rnd(40,LW-40),y:-34,vy:24*vM,vx:0,
+   ph:Math.random()*6.28,hp:Math.round(4*hpM),shield:2,r:15,fl:0,t:0,
+   ft:rnd(2,3.5)*ftM});
+  return;
+ }
+ if(mm>=2&&r<0.28){
+  for(let i=0;i<5;i++){
+   G.enemies.push({k:'swarm',x:rnd(20,LW-20),y:-26-i*12,vy:70*vM,vx:rnd(-20,20),
+    ph:Math.random()*6.28,hp:1,r:8,fl:0,t:0,ft:999});
+  }
+  return;
+ }
+
+ if(mm>=2&&r<0.36){
+  G.enemies.push({k:'hv',x:rnd(40,LW-40),y:-34,vy:26*vM,vx:rnd(-10,10),
+   ph:Math.random()*6.28,hp:Math.round(9*hpM),r:17,fl:0,t:0,ft:rnd(1.6,2.4)*ftM});
+ }else if(mm>=1&&r<0.55){
+  G.enemies.push({k:'med',x:rnd(36,LW-36),y:-30,vy:32*vM,vx:0,
+   ph:Math.random()*6.28,hp:Math.round(4*hpM),r:14,fl:0,t:0,ft:rnd(1.6,2.6)*ftM});
+ }else{
+  G.enemies.push({k:'lite',x:rnd(30,LW-30),y:-26,vy:rnd(38,52)*vM,vx:0,
+   ph:Math.random()*6.28,hp:Math.round(2*hpM),r:12,fl:0,t:0,ft:rnd(2,3.6)*ftM});
+ }
+}
+
+/* ============================================================
+   БОССЫ: 6 ТИПОВ
+   ============================================================ */
+function spawnBoss(){
+ const lvl=Math.ceil(G.wave/5);
+ const idx=(lvl-1)%6;
+ const tier=Math.floor((lvl-1)/6);
+
+ const hpTable=[160,140,180,130,200,220];
+ const hp=hpTable[idx]+lvl*[45,40,55,35,60,65][idx];
+
+ G.boss={x:LW/2,y:-130,ty:120,vx:25,t:0,
+  hp:hp,maxhp:hp,lvl:lvl,type:idx,tier:tier,
+  bw:[56,52,56,46,62,64][idx],
+  bh:[34,32,38,32,36,38][idx],
+  fl:0,aT:1.6,aB:3.4,aS:6,aM:4,aR:7,
+  spA:0,dying:0,dt2:0,entered:0,chgT:undefined,mgB:0,mgT:0,
+  teleTimer:2.5,teleOut:0,burstN:0,burstT:0};
+}
+
+function eShoot(x,y,vx,vy){G.ebullets.push({x:x,y:y,vx:vx,vy:vy,r:4});}
+function eRocket(x,y,vx,vy){G.ebullets.push({x:x,y:y,vx:vx,vy:vy,r:4.6,h:1,life:5});}
+function eLaser(x,y,tx,ty){
+ const dx=tx-x,dy=ty-y,d=Math.hypot(dx,dy)||1;
+ G.ebullets.push({x:x,y:y,vx:dx/d*400,vy:dy/d*400,r:2.5,laser:1});
+}
+
+/* ============================================================
+   ОГОНЬ ИГРОКА (6 уровней, включая лазер)
+   ============================================================ */
+function firePlayer(){
+ const P=G.P,a=P.aim,sx=Math.cos(a),sy=Math.sin(a);
+ P.rec=0.12;
+
+ if(P.gun===1){
+  G.bullets.push({x:P.x+sx*20,y:P.y+sy*20,vx:sx*300,vy:sy*300,dmg:1,k:0});
+  P.cool=0.55;
+ }else if(P.gun===2){
+  const ox=Math.cos(a+1.57)*7,oy=Math.sin(a+1.57)*7;
+  G.bullets.push({x:P.x+ox+sx*20,y:P.y+oy+sy*20,vx:sx*300,vy:sy*300,dmg:1,k:0});
+  G.bullets.push({x:P.x-ox+sx*20,y:P.y-oy+sy*20,vx:sx*300,vy:sy*300,dmg:1,k:0});
+  P.cool=0.5;
+ }else if(P.gun===3){
+  G.bullets.push({x:P.x+sx*20,y:P.y+sy*20,vx:sx*300,vy:sy*300,dmg:1,k:0});
+  P.cool=0.5;
+ }else if(P.gun===4){
+  G.bullets.push({x:P.x+sx*20,y:P.y+sy*20,vx:sx*300,vy:sy*300,dmg:2,k:0,big:1});
+  P.cool=0.48;
+ }else if(P.gun===5){
+  G.bullets.push({x:P.x+sx*20,y:P.y+sy*20,vx:sx*340,vy:sy*340,dmg:2.5,k:0,big:1});
+  P.cool=0.45;
+ }else{
+  G.bullets.push({x:P.x+sx*20,y:P.y+sy*20,vx:sx*500,vy:sy*500,dmg:4,k:3,laser:1,life:0.8});
+  P.cool=0.35;
+  G.bullets.push({x:P.x+sx*20,y:P.y+sy*20,vx:sx*340,vy:sy*340,dmg:2.5,k:0,big:1});
+ }
+ sShot();
+}
+function fireMg(){
+ const P=G.P;
+ P.mgSide=!P.mgSide;
+ const a=P.aim+(P.mgSide?0.12:-0.12);
+ const sx=Math.cos(a),sy=Math.sin(a);
+ const ox=Math.cos(a+1.57)*(P.mgSide?11:-11),oy=Math.sin(a+1.57)*(P.mgSide?11:-11);
+ G.bullets.push({x:P.x+ox,y:P.y+oy,vx:sx*420,vy:sy*420,dmg:0.35,k:1});
+ P.mg=0.11;
+ sMg();
+}
+function fireRockets(){
+ const P=G.P,dmg=P.gun>=6?5:4;
+ for(let s=-1;s<=1;s+=2){
+  const ox=Math.cos(P.aim+1.57)*15*s,oy=Math.sin(P.aim+1.57)*15*s;
+  G.bullets.push({x:P.x+ox,y:P.y+oy,
+   vx:Math.cos(P.aim+s*0.35)*200,vy:Math.sin(P.aim+s*0.35)*200,
+   dmg:dmg,k:2,h:1,life:3});
+ }
+ P.rk=1.7;
+ sRk();
+}
+
+/* ============================================================
+   ДРОП ЯЩИКОВ С ВРАГОВ
+   ============================================================ */
+function dropCrate(x,y){
+ const r=Math.random(),m=(G.mission-1)%3;
+ let k;
+ if(m===0)k=r<0.40?'g':r<0.60?'a':r<0.78?'s':r<0.90?'$':'+';
+ else if(m===1)k=r<0.20?'m':r<0.35?'r':r<0.52?'a':r<0.70?'s':r<0.90?'$':'+';
+ else k=r<0.15?'h':r<0.28?'L':r<0.45?'r':r<0.60?'a':r<0.78?'s':r<0.92?'$':'+';
+ if((k==='g'&&G.P.gun>=2)||(k==='m'&&G.P.gun>=3)||(k==='r'&&G.P.gun>=4)||(k==='h'&&G.P.gun>=5)||(k==='L'&&G.P.gun>=6))
+  k=Math.random()<0.5?'a':'$';
+ G.crates.push({x:x,y:y,vy:48,k:k,ph:Math.random()*6.28});
+}
+
+/* ============================================================
+   УБИЙСТВО ВРАГА И УРОН ИГРОКУ
+   ============================================================ */
+function killEnemy(i){
+ const e=G.enemies[i];
+ const pts=(e.k==='lite'?80:e.k==='med'?180:e.k==='hv'?400:
+            e.k==='sniper'?300:e.k==='shield'?250:e.k==='swarm'?40:100)+G.mission*20;
+ G.score+=pts;
+ explode(e.x,e.y,e.k!=='lite'&&e.k!=='swarm');
+ pop('+'+pts,e.x,e.y-12,'#ffd23f',e.k==='hv'||e.k==='shield'?1.2:0.9);
+ sBoom();
+ const ch=e.k==='lite'?0.22:e.k==='med'?0.42:e.k==='hv'?0.65:
+          e.k==='sniper'?0.55:e.k==='shield'?0.5:e.k==='swarm'?0.05:0.3;
+ if(Math.random()<ch)dropCrate(e.x,e.y);
+ G.enemies.splice(i,1);
+}
+
+function hurtPlayer(){
+ const P=G.P;
+ if(P.star>0)return;
+ if(P.inv>0)return;
+ if(P.aCd<=0&&P.armor>0){
+  P.armor--;P.aCd=6;P.inv=1;
+  burst(P.x,P.y,'#c8d8c0',14);ring(P.x,P.y,14,'200,220,190');
+  pop('БРОНЯ ДЕРЖИТ (ОСТ. '+P.armor+')',P.x,P.y-30,'#c8d8c0',0.9);
+  sPow();G.flash=0.3;G.flashC='200,220,190';
+  return;
+ }
+ G.lives--;
+ P.inv=2.2;G.flash=0.5;G.flashC='255,120,120';G.shake=14;
+ explode(P.x,P.y,false);sHurt();
+ if(P.gun>1)P.gun--;
+ if(G.lives<=0){
+  explode(P.x,P.y,true);sBoomBig();
+  if(G.score>G.best){
+   G.best=G.score;
+   try{localStorage.setItem('steelBest2',String(G.best));}catch(e){}
+  }
+  G.state='over';
+ }
+}
+
+/* ============================================================
+   ДЕКОРАЦИИ (привязаны к земле — едут с той же скоростью)
+   ============================================================ */
+let decor=[];
+function initDecor(){
+ decor=[];
+ for(let i=0;i<24;i++)
+  decor.push({x:rnd(10,LW-10),y:rnd(-40,LH+40),k:0,s:rnd(0.7,1.3),ph:Math.random()*6.28});
+ for(let i=0;i<12;i++)
+  decor.push({x:rnd(14,LW-14),y:rnd(-40,LH+40),k:1,s:rnd(0.8,1.4),ph:Math.random()*6.28});
+}
+
+function h1(n){n=Math.sin(n*127.1)*43758.5453;return n-Math.floor(n);}
+
+function moveDecor(dt){
+ for(const d of decor){
+  d.y+=48*dt*(G.state==='play'?1:0.4);
+  if(d.y>LH+60){
+   d.y-=LH+120;d.x=rnd(10,LW-10);
+   d.s=rnd(0.7,1.4);d.k=Math.random()<0.65?0:1;d.ph=Math.random()*6.28;
+  }
+ }
+}
+
+/* ============================================================
+   ПРЕПЯТСТВИЯ (свои для каждой миссии)
+   ============================================================ */
+function spawnObstacle(){
+ const r=Math.random(),m=(G.mission-1)%3;
+ let k;
+ if(m===0){
+  k=r<0.40?'wire':r<0.70?'fence':'rock';
+ }else if(m===1){
+  k=r<0.30?'block':r<0.55?'rubble':r<0.75?'barrel':'wire';
+ }else{
+  k=r<0.30?'lava':r<0.55?'obsidian':r<0.75?'barrel':'rubble';
+ }
+ G.obstacles.push({k:k,x:rnd(24,LW-24),y:-30,t:0,crushT:0,crushed:false});
+}
+// ===== ЧАСТЬ 2 КОНЕЦ =====
+/* ============================================================
+   ГЛАВНЫЙ UPDATE
+   ============================================================ */
+function update(dt){
+ const P=G.P;
+ G.scroll+=48*dt;
+
+ /* === НАВОДКА БАШНИ === */
+ let bestD=1e9,bestA=P.aim;
+ if(G.boss&&!G.boss.dying&&G.boss.entered){
+  const d=Math.hypot(G.boss.x-P.x,G.boss.y-P.y);
+  bestD=d;bestA=Math.atan2(G.boss.y-P.y,G.boss.x-P.x);
+ }else{
+  for(const e of G.enemies){
+   const d=Math.hypot(e.x-P.x,e.y-P.y);
+   if(d<bestD&&e.y<P.y+10){bestD=d;bestA=Math.atan2(e.y-P.y,e.x-P.x);}
+  }
+ }
+ let da=bestA-P.aim;
+ while(da>Math.PI)da-=6.283;
+ while(da<-Math.PI)da+=6.283;
+ P.aim+=da*Math.min(1,10*dt);
+
+ /* === КОРПУС ИГРОКА === */
+ const px0=P.x,py0=P.y;
+ const kx=(P.tx-P.x),ky=(P.ty-P.y);
+ const spd=Math.min(1,6.5*dt);
+ P.x+=kx*spd;P.y+=ky*spd;
+ P.x=clamp(P.x,18,LW-18);P.y=clamp(P.y,64,LH-42);
+ P.inv=Math.max(0,P.inv-dt);
+ P.aCd=Math.max(0,P.aCd-dt);
+ P.cool-=dt;P.mg-=dt;P.rk-=dt;
+ P.rec=Math.max(0,P.rec-dt);
+ P.star=Math.max(0,P.star-dt);
+
+ /* Пыль из-под гусениц — танк «стоит» на земле */
+ const mv=Math.hypot(P.x-px0,P.y-py0);
+ if(mv>0.6&&Math.random()<0.5){
+  G.parts.push({x:P.x-(P.x-px0)*12+rnd(-5,5),
+                y:P.y-(P.y-py0)*12+rnd(-3,3),
+                vx:rnd(-8,8),vy:rnd(6,20),
+                life:rnd(0.25,0.55),c:'#5a5142',s:2});
+ }
+
+ if(P.cool<=0)firePlayer();
+ if(P.gun>=3&&P.mg<=0)fireMg();
+ if(P.gun>=4&&P.rk<=0)fireRockets();
+
+ /* === БОСС-ПРЕДУПРЕЖДЕНИЕ === */
+ if(G.bossWarn>0){
+  G.bossWarn-=dt;
+  if(G.bossWarn<=0)spawnBoss();
+ }
+
+ /* === СПАВН ВРАГОВ === */
+ if(!G.boss&&G.spawnQ>0){
+  G.spawnT-=dt;
+  if(G.spawnT<=0){
+   spawnEnemy();G.spawnQ--;
+   G.spawnT=rnd(0.5,1.1)*Math.max(0.5,1-G.wave*0.04);
+  }
+ }
+
+ /* === СМЕНА ВОЛНЫ === */
+ if(!G.boss&&G.bossWarn<=0&&G.spawnQ<=0&&G.enemies.length===0){
+  G.waveClearT-=dt;
+  if(G.waveClearT<=0){nextWave();G.waveClearT=1.4;}
+ }else G.waveClearT=1.4;
+
+ /* === ПРЕПЯТСТВИЯ === */
+ G.obsT-=dt;
+ if(G.obsT<=0){
+  G.obsT=rnd(1.2,2.6);
+  spawnObstacle();
+ }
+ for(let i=G.obstacles.length-1;i>=0;i--){
+  const o=G.obstacles[i];
+  o.t+=dt;o.y+=48*dt;
+  if(o.crushT>0){o.crushT-=dt;if(o.crushT<=0){G.obstacles.splice(i,1);continue;}}
+  if(o.y>LH+34){G.obstacles.splice(i,1);continue;}
+  if(!o.crushed&&Math.abs(o.x-P.x)<20&&Math.abs(o.y-P.y)<16){
+   o.crushed=true;o.crushT=0.3;
+   G.streak++;
+   const pts=o.k==='barrel'?50:o.k==='rock'||o.k==='obsidian'?80:60;
+   G.score+=pts;
+   if(o.k==='barrel'){
+    explode(o.x,o.y,false);sBoom();
+    if(Math.random()<0.3)dropCrate(o.x,o.y);
+   }else if(o.k==='lava'){
+    hurtPlayer();
+   }else{
+    burst(o.x,o.y,o.k==='wire'?'#8a8a7a':o.k==='rubble'?'#8a7a58':'#8a8478',10);
+    sCrush();
+   }
+   pop('+'+pts,o.x,o.y-10,'#cfe8ff',0.8);
+   if(G.streak===10){
+    G.score+=500;pop('СЕРИЯ РУБКИ! +500',P.x,P.y-42,'#ffd23f',1.4);
+    ring(P.x,P.y,16,'255,210,90');sPow();
+   }else if(G.streak>10&&G.streak%10===0){
+    G.score+=250;pop('СЕРИЯ +250',P.x,P.y-42,'#ffd23f',1);
+   }
+  }else if(o.y>P.y+26&&!o.crushed&&G.streak>0){
+   G.streak=0;
+  }
+ }
+
+ /* === ПУЛИ ИГРОКА === */
+ for(let i=G.bullets.length-1;i>=0;i--){
+  const b=G.bullets[i];
+
+  if(b.laser){
+   b.life-=dt;
+   if(b.life<=0){G.bullets.splice(i,1);continue;}
+  }
+
+  if(b.h){
+   b.life-=dt;
+   let tx=null,ty=null,bd=1e9;
+   if(G.boss&&!G.boss.dying){
+    const d=Math.hypot(G.boss.x-b.x,G.boss.y-b.y);
+    if(d<bd){bd=d;tx=G.boss.x;ty=G.boss.y;}
+   }
+   for(const e of G.enemies){
+    const d=Math.hypot(e.x-b.x,e.y-b.y);
+    if(d<bd){bd=d;tx=e.x;ty=e.y;}
+   }
+   if(tx!==null){
+    const dx=tx-b.x,dy=ty-b.y,d=Math.hypot(dx,dy)||1;
+    b.vx+=dx/d*260*dt;b.vy+=dy/d*260*dt;
+    const sp=Math.hypot(b.vx,b.vy);
+    if(sp>290){b.vx*=290/sp;b.vy*=290/sp;}
+   }
+   if(Math.random()<0.5)
+    G.parts.push({x:b.x,y:b.y,vx:rnd(-8,8),vy:rnd(-8,8),life:0.4,c:'#8a8a80',s:1});
+   if(b.life<=0){
+    G.bullets.splice(i,1);
+    ring(b.x,b.y,10,'255,160,70');
+    continue;
+   }
+  }
+
+  b.x+=b.vx*dt;b.y+=b.vy*dt;
+  if(b.y<-14||b.y>LH+14||b.x<-10||b.x>LW+10){G.bullets.splice(i,1);continue;}
+
+  /* Попадание по боссу */
+  if(G.boss&&!G.boss.dying){
+   const B=G.boss;
+   if(Math.abs(b.x-B.x)<B.bw&&Math.abs(b.y-B.y)<B.bh){
+    B.hp-=b.dmg;B.fl=0.1;
+    burst(b.x,b.y,'#ffd23f',3,0.5);sHit();
+    if(b.k===2){
+     ring(b.x,b.y,12,'255,160,70');
+     for(const e of G.enemies)
+      if(Math.hypot(e.x-b.x,e.y-b.y)<44)e.hp-=1;
+     sBoom();
+    }
+    if(!b.laser)G.bullets.splice(i,1);
+    if(B.hp<=0){B.dying=1;B.dt2=0;}
+    continue;
+   }
+  }
+
+  /* Попадание по врагам */
+  let done=false;
+  for(let j=G.enemies.length-1;j>=0;j--){
+   const e=G.enemies[j];
+   if(Math.abs(b.x-e.x)<e.r+3&&Math.abs(b.y-e.y)<e.r+5){
+    let dmg=b.dmg;
+
+    if(e.k==='shield'&&e.shield>0){
+     e.shield-=dmg;
+     if(e.shield<0){dmg=-e.shield;e.shield=0;}else dmg=0;
+     burst(e.x,e.y,'#8ac0e0',5,0.6);
+    }
+
+    if(dmg>0){e.hp-=dmg;e.fl=0.1;}
+    burst(b.x,e.y-2,'#ffd23f',3,0.4);sHit();
+    if(b.k===2){
+     ring(b.x,b.y,12,'255,160,70');
+     for(const o of G.enemies)
+      if(o!==e&&Math.hypot(o.x-b.x,o.y-b.y)<44)o.hp-=1;
+     sBoom();
+    }
+    if(e.hp<=0)killEnemy(j);
+    done=true;break;
+   }
+  }
+  if(done&&!b.laser)G.bullets.splice(i,1);
+ }
+
+ /* === СНАРЯДЫ ВРАГОВ === */
+ for(let i=G.ebullets.length-1;i>=0;i--){
+  const b=G.ebullets[i];
+  if(b.h){
+   b.life-=dt;
+   if(b.life<=0){G.ebullets.splice(i,1);continue;}
+   const dx=P.x-b.x,dy=P.y-b.y,d=Math.hypot(dx,dy)||1;
+   b.vx+=dx/d*130*dt;b.vy+=dy/d*130*dt;
+   const sp=Math.hypot(b.vx,b.vy);
+   if(sp>165){b.vx*=165/sp;b.vy*=165/sp;}
+  }
+  b.x+=b.vx*dt;b.y+=b.vy*dt;
+  if(b.y>LH+12||b.y<-14||b.x<-12||b.x>LW+12){G.ebullets.splice(i,1);continue;}
+  if(Math.abs(b.x-P.x)<9&&Math.abs(b.y-P.y)<11){
+   G.ebullets.splice(i,1);
+   hurtPlayer();
+   if(G.state==='over')return;
+  }
+ }
+
+ /* === ВРАГИ: 6 ТИПОВ === */
+ for(let i=G.enemies.length-1;i>=0;i--){
+  const e=G.enemies[i];
+  e.t+=dt;e.fl=Math.max(0,e.fl-dt);
+
+  if(e.k==='lite'){
+   e.y+=e.vy*dt;
+   e.x+=Math.sin(e.t*1.6+e.ph)*22*dt;
+   e.ft-=dt;
+   if(e.ft<=0&&e.y>0){e.ft=rnd(2.4,4);eShoot(e.x,e.y+12,0,160);}
+
+  }else if(e.k==='med'){
+   e.y+=e.vy*dt;
+   e.x+=clamp(P.x-e.x,-40,40)*0.5*dt;
+   e.ft-=dt;
+   if(e.ft<=0&&e.y>0&&e.y<LH*0.72){
+    e.ft=rnd(2,3.2);
+    const dx=P.x-e.x,dy=P.y-e.y,d=Math.hypot(dx,dy)||1;
+    eShoot(e.x,e.y+13,dx/d*185,dy/d*185);
+   }
+
+  }else if(e.k==='hv'){
+   e.y+=e.vy*dt;
+   e.x+=e.vx*dt;
+   if(e.x<34||e.x>LW-34)e.vx*=-1;
+   e.ft-=dt;
+   if(e.ft<=0&&e.y>0&&e.y<LH*0.75){
+    e.ft=rnd(2.2,3);
+    const dx=P.x-e.x,dy=P.y-e.y,d=Math.hypot(dx,dy)||1,a=Math.atan2(dy,dx);
+    for(let k=-1;k<=1;k++)
+     eShoot(e.x,e.y+15,Math.cos(a+k*0.28)*170,Math.sin(a+k*0.28)*170);
+   }
+
+  }else if(e.k==='sniper'){
+   e.y+=e.vy*dt;
+   e.ft-=dt;
+   if(e.ft<=0&&e.y>0&&e.y<LH*0.65){
+    if(!e.aiming){e.aiming=true;e.aimT=1.5;}
+   }
+   if(e.aiming){
+    e.aimT-=dt;
+    if(e.aimT<=0){
+     e.aiming=false;e.ft=rnd(3.5,5);
+     eLaser(e.x,e.y,P.x,P.y);
+    }
+   }
+
+  }else if(e.k==='shield'){
+   e.y+=e.vy*dt;
+   e.ft-=dt;
+   if(e.ft<=0&&e.y>0&&e.y<LH*0.7){
+    e.ft=rnd(2.2,3.5);
+    const dx=P.x-e.x,dy=P.y-e.y,d=Math.hypot(dx,dy)||1,a=Math.atan2(dy,dx);
+    for(let k=-1;k<=1;k++)
+     eShoot(e.x,e.y+15,Math.cos(a+k*0.25)*140,Math.sin(a+k*0.25)*140);
+   }
+
+  }else if(e.k==='swarm'){
+   e.y+=e.vy*dt;
+   e.x+=e.vx*dt;
+   if(e.x<20||e.x>LW-20)e.vx*=-1;
+  }
+
+  if(Math.random()<0.03)smoke(e.x,e.y-14,1);
+  if(e.y>LH+34){G.enemies.splice(i,1);continue;}
+
+  /* Таран */
+  if(Math.abs(e.x-P.x)<e.r+9&&Math.abs(e.y-P.y)<e.r+11){
+   if(P.star>0){
+    G.score+=150;
+    pop('РАМ! +150',e.x,e.y-14,'#ffe97a',1);
+    explode(e.x,e.y,false);sBoom();
+    G.enemies.splice(i,1);
+   }else{
+    explode(e.x,e.y,false);sBoom();
+    G.enemies.splice(i,1);
+    hurtPlayer();
+    if(G.state==='over')return;
+   }
+  }
+ }
+
+ /* === ЯЩИКИ === */
+ for(let i=G.crates.length-1;i>=0;i--){
+  const d=G.crates[i];
+  d.y+=d.vy*dt;
+  if(d.y>LH+18){G.crates.splice(i,1);continue;}
+  if(Math.abs(d.x-P.x)<17&&Math.abs(d.y-P.y)<19){
+   applyCrate(d);
+   G.crates.splice(i,1);
+  }
+ }
+
+ if(G.boss)updateBoss(dt);
+
+ /* === ЧАСТИЦЫ / КОЛЬЦА / ВСПЛЫВАЮЩИЙ ТЕКСТ === */
+ for(let i=G.parts.length-1;i>=0;i--){
+  const p=G.parts[i];
+  p.x+=p.vx*dt;p.y+=(p.vy+30)*dt;
+  p.vx*=(1-1.6*dt);p.vy*=(1-1.6*dt);
+  p.life-=dt;
+  if(p.life<=0)G.parts.splice(i,1);
+ }
+ for(let i=G.rings.length-1;i>=0;i--){
+  const r=G.rings[i];
+  r.r+=(r.max-r.r)*6*dt;r.life-=dt*2.2;
+  if(r.life<=0)G.rings.splice(i,1);
+ }
+ for(let i=G.pops.length-1;i>=0;i--){
+  const p=G.pops[i];p.y+=p.vy*dt;p.life-=dt;
+  if(p.life<=0)G.pops.splice(i,1);
+ }
+ G.shake=Math.max(0,G.shake-dt*16);
+ G.flash=Math.max(0,G.flash-dt*2.2);
+ if(G.bannerT>0)G.bannerT-=dt;
+}
+
+/* ============================================================
+   ПРИМЕНЕНИЕ ЯЩИКА
+   ============================================================ */
+function applyCrate(d){
+ const P=G.P;
+ if(d.k==='g'){
+  if(P.gun<2){P.gun=2;pop('ОРУДИЕ: СПАРЕННОЕ',P.x,P.y-32,'#ffd23f',1);sUp();}
+  else{G.score+=200;pop('+200',d.x,d.y-10,'#ffd23f',1);sPow();}
+ }else if(d.k==='m'){
+  if(P.gun<3){P.gun=3;pop('ПУЛЕМЁТ УСТАНОВЛЕН',P.x,P.y-32,'#ffd23f',1);sUp();}
+  else{G.score+=250;pop('+250',d.x,d.y-10,'#ffd23f',1);sPow();}
+ }else if(d.k==='r'){
+  if(P.gun<4){P.gun=4;pop('РАКЕТЫ ЗАРЯЖЕНЫ',P.x,P.y-32,'#ff8a3c',1.1);sUp();}
+  else{G.score+=300;pop('+300',d.x,d.y-10,'#ffd23f',1);sPow();}
+ }else if(d.k==='h'){
+  if(P.gun<5){P.gun=5;pop('ТЯЖЁЛОЕ ОРУДИЕ!',P.x,P.y-32,'#ff6a6a',1.1);sUp();}
+  else{G.score+=400;pop('+400',d.x,d.y-10,'#ffd23f',1);sPow();}
+ }else if(d.k==='L'){
+  if(P.gun<6){P.gun=6;pop('ЛАЗЕР АКТИВИРОВАН!',P.x,P.y-32,'#4affff',1.3);sUp();
+   ring(P.x,P.y,20,'74,255,255');}
+  else{G.score+=500;pop('+500',d.x,d.y-10,'#ffd23f',1);sPow();}
+ }else if(d.k==='a'){
+  if(P.armor<5){P.armor++;pop('БРОНЯ +1 (ВСЕГО '+P.armor+')',P.x,P.y-32,'#c8d8c0',1);sUp();}
+  else{G.score+=250;pop('+250',d.x,d.y-10,'#ffd23f',1);sPow();}
+ }else if(d.k==='s'){
+  P.star=8;pop('ЗВЕЗДА! НЕУЯЗВИМОСТЬ',P.x,P.y-32,'#ffe97a',1.2);sPow();
+  ring(P.x,P.y,18,'255,230,130');
+ }else if(d.k==='$'){
+  G.score+=500;pop('+500',d.x,d.y-10,'#ffd23f',1.1);sPow();
+ }else{
+  G.lives=Math.min(5,G.lives+1);pop('+1 ЭКИПАЖ',P.x,P.y-32,'#7fdd8a',1.1);sPow();
+ }
+}
+// ===== ЧАСТЬ 3 КОНЕЦ =====
+/* ============================================================
+   БОССЫ: ОБНОВЛЕНИЕ
+   0 — Стальной Гром · 1 — Оса · 2 — Кузнец
+   3 — Призрак · 4 — Мамонт · 5 — Кремень
+   ============================================================ */
+function updateBoss(dt){
+ const B=G.boss;
+ B.t+=dt;B.fl=Math.max(0,B.fl-dt);
+ if(B.dying){
+  B.dt2+=dt;
+  if(Math.random()<0.5){
+   const ex=B.x+rnd(-44,44),ey=B.y+rnd(-22,22);
+   burst(ex,ey,'#ff9a3c',8);ring(ex,ey,6,'255,150,60');
+  }
+  if(B.dt2>1.3){
+   explode(B.x,B.y,true);
+   explode(B.x-38,B.y+8,true);
+   explode(B.x+38,B.y-6,true);
+   sBoomBig();
+   const pts=1000+B.type*700+B.lvl*500;
+   G.score+=pts;
+   pop('БОСС ПОВЕРЖЕН +'+pts,LW/2,LH*0.35,'#ffd23f',1.6);
+   for(let i=0;i<4;i++)dropCrate(B.x+rnd(-40,40),B.y+rnd(-10,10));
+   G.boss=null;
+  }
+  return;
+ }
+
+ if(!B.entered){
+  B.y+=34*dt;
+  if(B.y>=B.ty)B.entered=1;
+  return;
+ }
+
+ const enr=B.hp<B.maxhp*0.4?0.6:1;
+ const aim=Math.atan2(G.P.y-B.y,G.P.x-B.x);
+
+ /* ===== 0: СТАЛЬНОЙ ГРОМ ===== */
+ if(B.type===0){
+  B.x+=B.vx*dt;
+  if(B.x<62){B.x=62;B.vx=Math.abs(B.vx);}
+  if(B.x>LW-62){B.x=LW-62;B.vx=-Math.abs(B.vx);}
+  B.aT-=dt*enr;
+  if(B.aT<=0){B.aT=rnd(1.7,2.3);B.chgT=0.5;}
+  if(B.chgT!==undefined&&B.chgT>0){
+   B.chgT-=dt;
+   if(B.chgT<=0){
+    B.chgT=undefined;
+    for(let i=0;i<5;i++){
+     const a=aim+(i-2)*0.17;
+     eShoot(B.x,B.y+28,Math.cos(a)*150,Math.sin(a)*150);
+    }
+    tone(220,anow(),0.1,'sawtooth',0.05,110);
+   }
+  }
+  B.aB-=dt*enr;
+  if(B.aB<=0){
+   B.aB=rnd(3,3.8);
+   const off=Math.random()*6.28;
+   for(let i=0;i<12;i++){
+    const a=off+i/12*6.28;
+    eShoot(B.x+Math.cos(a)*22,B.y+Math.sin(a)*16,Math.cos(a)*100,Math.sin(a)*100+25);
+   }
+   tone(160,anow(),0.14,'sawtooth',0.06,80);
+  }
+  B.aS-=dt*enr;
+  if(B.aS<=0){
+   B.aS=rnd(6,8);
+   G.enemies.push({k:'lite',x:B.x+rnd(-46,46),y:B.y+14,vy:38,vx:0,
+    ph:Math.random()*6.28,hp:2,r:12,fl:0,t:0,ft:rnd(2,3.4)});
+  }
+ }
+
+ /* ===== 1: ОСА ===== */
+ else if(B.type===1){
+  B.x+=B.vx*2*dt;
+  if(B.x<60){B.x=60;B.vx=Math.abs(B.vx);}
+  if(B.x>LW-60){B.x=LW-60;B.vx=-Math.abs(B.vx);}
+  B.y=B.ty+Math.sin(B.t*1.5)*30;
+  B.aT-=dt*enr;
+  if(B.aT<=0){
+   B.aT=rnd(1.3,1.9);
+   for(let i=0;i<7;i++){
+    const a=Math.PI/2+(i-3)*0.22;
+    eShoot(B.x,B.y+20,Math.cos(a)*160,Math.sin(a)*160);
+   }
+   tone(300,anow(),0.1,'square',0.05,150);
+  }
+  B.aS-=dt*enr;
+  if(B.aS<=0){
+   B.aS=rnd(4.5,6);
+   for(let i=0;i<6;i++){
+    G.enemies.push({k:'swarm',x:B.x+rnd(-50,50),y:B.y+rnd(-10,10),
+     vy:90,vx:rnd(-30,30),ph:Math.random()*6.28,hp:1,r:8,fl:0,t:0,ft:999});
+   }
+   tone(500,anow(),0.15,'sawtooth',0.06,900);
+  }
+  B.aB-=dt*enr;
+  if(B.aB<=0){
+   B.aB=rnd(3.5,4.5);
+   B.spA=Math.random()*6.28;
+   for(let i=0;i<10;i++){
+    const a=B.spA+i*0.628;
+    eShoot(B.x,B.y,Math.cos(a)*120,Math.sin(a)*120);
+   }
+  }
+ }
+
+ /* ===== 2: КУЗНЕЦ ===== */
+ else if(B.type===2){
+  B.x+=Math.sin(B.t*0.5)*20*dt;
+  B.aT-=dt*enr;
+  if(B.aT<=0){B.aT=rnd(2,2.6);B.chgT=0.8;}
+  if(B.chgT!==undefined&&B.chgT>0){
+   B.chgT-=dt;
+   if(B.chgT<=0){
+    B.chgT=undefined;
+    for(let i=0;i<20;i++){
+     const a=(i/20)*6.28;
+     eShoot(B.x+Math.cos(a)*30,B.y+Math.sin(a)*30,
+      Math.cos(a)*140,Math.sin(a)*140);
+    }
+    G.shake=18;
+    ring(B.x,B.y,40,'255,150,60');
+    sBoom();
+   }
+  }
+  B.aS-=dt*enr;
+  if(B.aS<=0){
+   B.aS=rnd(5,6);
+   for(let i=0;i<2;i++){
+    G.enemies.push({k:'med',x:B.x+rnd(-50,50),y:B.y+20,vy:30,vx:0,
+     ph:Math.random()*6.28,hp:4,r:14,fl:0,t:0,ft:rnd(1.8,2.8)});
+   }
+  }
+ }
+
+ /* ===== 3: ПРИЗРАК ===== */
+ else if(B.type===3){
+  B.x+=B.vx*0.7*dt;
+  if(B.x<70){B.x=70;B.vx=Math.abs(B.vx);}
+  if(B.x>LW-70){B.x=LW-70;B.vx=-Math.abs(B.vx);}
+  B.y=B.ty+Math.sin(B.t*1.2)*20;
+  B.teleTimer-=dt;
+  if(B.teleTimer<=0){
+   B.teleTimer=rnd(2.2,3);
+   burst(B.x,B.y,'#a080ff',20);
+   B.x=clamp(G.P.x+rnd(-120,120),70,LW-70);
+   B.teleOut=0.4;
+   burst(B.x,B.y,'#a080ff',20);
+   tone(600,anow(),0.2,'sawtooth',0.06,200);
+  }
+  if(B.teleOut>0)B.teleOut-=dt;
+  /* Очередь из 3 выстрелов — на игровых таймерах (не setTimeout) */
+  B.aT-=dt*enr;
+  if(B.aT<=0){B.aT=rnd(1.4,2);B.burstN=3;B.burstT=0;}
+  if(B.burstN>0){
+   B.burstT-=dt;
+   if(B.burstT<=0){
+    B.burstT=0.13;B.burstN--;
+    eShoot(B.x,B.y+20,(G.P.x-B.x)*0.9,(G.P.y-B.y)*0.9);
+    tone(700,anow(),0.05,'square',0.04,300);
+   }
+  }
+  B.aS-=dt*enr;
+  if(B.aS<=0){
+   B.aS=rnd(6,8);
+   for(let i=0;i<2;i++){
+    G.enemies.push({k:'sniper',x:B.x+rnd(-40,40),y:B.y+20,vy:10,vx:0,
+     ph:Math.random()*6.28,hp:3,r:13,fl:0,t:0,
+     ft:rnd(2,3),aimT:0,aiming:false});
+   }
+  }
+ }
+
+ /* ===== 4: МАМОНТ ===== */
+ else if(B.type===4){
+  B.x+=B.vx*dt;
+  if(B.x<72){B.x=72;B.vx=Math.abs(B.vx);}
+  if(B.x>LW-72){B.x=LW-72;B.vx=-Math.abs(B.vx);}
+  B.y=B.ty+Math.sin(B.t*0.9)*14;
+  B.aT-=dt*enr;
+  if(B.aT<=0){
+   B.aT=rnd(1.5,2.1);
+   for(let i=-1;i<=1;i+=2)
+    eShoot(B.x+i*14,B.y+28,Math.cos(aim+i*0.06)*185,Math.sin(aim+i*0.06)*185);
+   tone(280,anow(),0.08,'square',0.05,140);
+  }
+  B.aB-=dt*enr;
+  if(B.aB<=0){
+   B.aB=rnd(2.8,3.6);
+   for(let i=0;i<7;i++){
+    const a=Math.PI/2+(i-3)*0.2;
+    eShoot(B.x,B.y+30,Math.cos(a)*115,Math.sin(a)*115);
+   }
+   tone(130,anow(),0.16,'sawtooth',0.06,60);
+  }
+  B.aS-=dt*enr;
+  if(B.aS<=0){
+   B.aS=rnd(6.5,8.5);
+   G.enemies.push({k:'med',x:B.x+rnd(-44,44),y:B.y+18,vy:30,vx:0,
+    ph:Math.random()*6.28,hp:4,r:14,fl:0,t:0,ft:rnd(1.8,2.8)});
+  }
+ }
+
+ /* ===== 5: КРЕМЕНЬ ===== */
+ else if(B.type===5){
+  B.x+=B.vx*0.5*dt;
+  if(B.x<76){B.x=76;B.vx=Math.abs(B.vx);}
+  if(B.x>LW-76){B.x=LW-76;B.vx=-Math.abs(B.vx);}
+  B.y=B.ty+Math.sin(B.t*0.7)*12;
+  B.aT-=dt*enr;
+  if(B.aT<=0){
+   B.aT=rnd(1,1.3);
+   B.spA+=0.7;
+   for(let i=0;i<3;i++){
+    const a=B.spA+i*2.09;
+    eShoot(B.x,B.y,Math.cos(a)*120,Math.sin(a)*120);
+   }
+  }
+  B.aB-=dt*enr;
+  if(B.aB<=0){B.aB=rnd(3.4,4.2);B.chgT=0.6;}
+  if(B.chgT!==undefined&&B.chgT>0){
+   B.chgT-=dt;
+   if(B.chgT<=0){
+    B.chgT=undefined;
+    const off=Math.random()*6.28;
+    for(let i=0;i<16;i++){
+     const a=off+i/16*6.28;
+     eShoot(B.x+Math.cos(a)*24,B.y+Math.sin(a)*24,Math.cos(a)*110,Math.sin(a)*110);
+    }
+    tone(110,anow(),0.2,'sawtooth',0.08,50);
+   }
+  }
+  B.aS-=dt*enr;
+  if(B.aS<=0){
+   B.aS=rnd(7,9);
+   for(let i=0;i<2;i++)
+    G.enemies.push({k:'lite',x:B.x+rnd(-50,50),y:B.y+20,vy:36,vx:0,
+     ph:Math.random()*6.28,hp:2,r:12,fl:0,t:0,ft:rnd(2,3.4)});
+  }
+ }
+
+ /* Доп. оружие повторных встреч */
+ if(B.tier>=1){
+  if(B.mgB>0){
+   B.mgT-=dt;
+   if(B.mgT<=0){
+    B.mgT=0.14;B.mgB--;
+    eShoot(B.x-30,B.y+22,Math.cos(aim+0.12)*230,Math.sin(aim+0.12)*230);
+    eShoot(B.x+30,B.y+22,Math.cos(aim-0.12)*230,Math.sin(aim-0.12)*230);
+    noiseHit(anow(),0.03,0.03,2.4,800);
+   }
+  }else{
+   B.aM-=dt*enr;
+   if(B.aM<=0){B.aM=rnd(3.6,4.6);B.mgB=6;B.mgT=0;}
+  }
+ }
+ if(B.tier>=2){
+  B.aR-=dt*enr;
+  if(B.aR<=0){
+   B.aR=rnd(4.2,5.4);
+   eRocket(B.x-44,B.y+6,-60,70);
+   eRocket(B.x+44,B.y+6,60,70);
+   tone(500,anow(),0.12,'square',0.05,900);
+  }
+ }
+
+ if(B.hp<B.maxhp*0.4&&Math.random()<0.3)
+  smoke(B.x+rnd(-36,36),B.y+rnd(-12,12),1);
+
+ if(G.P.inv<=0&&G.P.star<=0&&
+    Math.abs(G.P.x-B.x)<B.bw+4&&Math.abs(G.P.y-B.y)<B.bh+4)hurtPlayer();
+}
+
+/* ============================================================
+   ЗЕМЛЯ: prerender-тайл, единая скорость с декором
+   (танк «стоит» на земле, а не парит)
+   ============================================================ */
+let terrainBuf=null,terrainM=-1;
+function buildTerrain(){
+ const m=(G.mission-1)%3,H=LH+120;
+ terrainM=m;
+ terrainBuf=document.createElement('canvas');
+ terrainBuf.width=LW;terrainBuf.height=H;
+ const t=terrainBuf.getContext('2d');
+ t.fillStyle=m===0?'#3a4a2a':m===1?'#3a3a3a':'#1a1210';
+ t.fillRect(0,0,LW,H);
+ let i,x,y;
+ if(m===0){
+  for(i=0;i<70;i++){
+   x=h1(i*3.7+1)*LW;y=h1(i*7.3+2)*H;
+   t.fillStyle='rgba(60,50,30,0.35)';
+   t.beginPath();t.ellipse(x,y,8+h1(i+5)*14,4+h1(i+9)*7,0,0,7);t.fill();
+  }
+  t.strokeStyle='rgba(80,120,50,0.4)';t.lineWidth=1;
+  for(i=0;i<90;i++){
+   x=h1(i*5.1+3)*LW;y=h1(i*9.7+5)*H;
+   t.beginPath();t.moveTo(x,y);
+   t.lineTo(x+(h1(i+11)-0.5)*4,y-3-h1(i+13)*4);t.stroke();
+  }
+ }else if(m===1){
+  for(i=0;i<45;i++){
+   x=h1(i*3.7+1)*LW;y=h1(i*7.3+2)*H;
+   t.fillStyle='rgba(50,50,55,0.5)';
+   t.beginPath();t.ellipse(x,y,15+h1(i+5)*20,8+h1(i+9)*12,0,0,7);t.fill();
+  }
+  t.strokeStyle='rgba(20,20,25,0.8)';t.lineWidth=1.5;
+  for(i=0;i<34;i++){
+   x=h1(i*4.3+2)*LW;y=h1(i*8.1+3)*H;
+   t.beginPath();t.moveTo(x,y);
+   t.lineTo(x+(h1(i+11)-0.5)*30,y+10+h1(i+13)*15);
+   t.lineTo(x+(h1(i+17)-0.5)*20,y+25+h1(i+19)*20);t.stroke();
+  }
+  for(i=0;i<24;i++){
+   x=h1(i*6.7+4)*LW;y=h1(i*10.3+6)*H;
+   t.fillStyle='rgba(80,80,85,0.7)';
+   t.fillRect(x,y,3+h1(i+21)*5,(3+h1(i+21)*5)*0.6);
+  }
+ }else{
+  for(i=0;i<55;i++){
+   x=h1(i*3.7+1)*LW;y=h1(i*7.3+2)*H;
+   t.fillStyle='rgba(30,20,15,0.6)';
+   t.beginPath();t.ellipse(x,y,10+h1(i+5)*15,5+h1(i+9)*10,0,0,7);t.fill();
+  }
+ }
+}
+function drawTerrain(){
+ if(!terrainBuf||terrainM!==(G.mission-1)%3)buildTerrain();
+ const H=LH+120,oy=G.scroll%H;
+ bctx.drawImage(terrainBuf,0,Math.round(oy-H));
+ bctx.drawImage(terrainBuf,0,Math.round(oy));
+ if((G.mission-1)%3===2){
+  /* Пульсирующие лавовые трещины — единственный анимированный слой */
+  for(let i=0;i<15;i++){
+   const x=h1(i*4.3+2)*LW;
+   const y=((h1(i*8.1+3)*H+G.scroll)%H)-60;
+   const len=30+h1(i+11)*50;
+   const glow=0.35+0.3*Math.sin(G.t*4+i*1.3);
+   const grd=bctx.createLinearGradient(x,y,x,y+len);
+   grd.addColorStop(0,'rgba(255,100,20,0)');
+   grd.addColorStop(0.5,'rgba(255,140,40,'+glow.toFixed(2)+')');
+   grd.addColorStop(1,'rgba(255,100,20,0)');
+   bctx.fillStyle=grd;bctx.fillRect(x-2,y,4,len);
+   bctx.strokeStyle='rgba(255,120,40,0.9)';bctx.lineWidth=1.5;
+   bctx.beginPath();bctx.moveTo(x,y);
+   bctx.lineTo(x+(h1(i+13)-0.5)*16,y+len*0.4);
+   bctx.lineTo(x+(h1(i+17)-0.5)*12,y+len*0.7);
+   bctx.lineTo(x+(h1(i+19)-0.5)*20,y+len);
+   bctx.stroke();
+  }
+ }
+}
+
+/* ============================================================
+   ОТРИСОВКА: ДЕКОРАЦИИ
+   ============================================================ */
+function drawDeco(){
+ const m=(G.mission-1)%3;
+ for(const d of decor){
+  const x=Math.round(d.x),y=Math.round(d.y),s=d.s;
+  if(d.k===0){
+   if(m===0)bctx.fillStyle='rgba(60,80,40,0.4)';
+   else if(m===1)bctx.fillStyle='rgba(40,40,45,0.4)';
+   else bctx.fillStyle='rgba(40,25,20,0.5)';
+   bctx.beginPath();bctx.ellipse(x,y,26*s,13*s,d.ph,0,7);bctx.fill();
+  }else{
+   if(m===0){
+    if(d.s>1.1){
+     bctx.fillStyle='rgba(20,40,15,0.3)';
+     bctx.beginPath();bctx.ellipse(x+5,y+6,12*s,5*s,0,0,7);bctx.fill();
+     bctx.fillStyle='#2a4a1c';
+     bctx.beginPath();bctx.arc(x,y,11*s,0,7);bctx.fill();
+     bctx.fillStyle='#3e6626';
+     bctx.beginPath();bctx.arc(x-3*s,y-3*s,8*s,0,7);bctx.fill();
+     bctx.fillStyle='#5a8a38';
+     bctx.beginPath();bctx.arc(x-5*s,y-5*s,4*s,0,7);bctx.fill();
+    }else{
+     bctx.fillStyle='#4a4434';
+     bctx.beginPath();bctx.arc(x,y,6*s,0,7);bctx.fill();
+     bctx.fillStyle='#6a6458';
+     bctx.beginPath();bctx.arc(x-2,y-2,4*s,0,7);bctx.fill();
+    }
+   }else if(m===1){
+    if(d.s>1.1){
+     bctx.fillStyle='rgba(20,20,25,0.4)';
+     bctx.beginPath();bctx.ellipse(x+3,y+4,12*s,6*s,0,0,7);bctx.fill();
+     bctx.fillStyle='#5a5a5e';
+     bctx.fillRect(x-10*s,y-6*s,20*s,12*s);
+     bctx.fillStyle='#7a7a7e';
+     bctx.fillRect(x-10*s,y-6*s,20*s,3*s);
+     bctx.strokeStyle='#2a2a2e';bctx.lineWidth=1.2;
+     bctx.strokeRect(x-10*s,y-6*s,20*s,12*s);
+     bctx.strokeStyle='rgba(10,10,12,0.8)';
+     bctx.beginPath();bctx.moveTo(x-6*s,y-4*s);bctx.lineTo(x-2*s,y+2*s);bctx.stroke();
+    }else{
+     bctx.fillStyle='#3a3a3e';
+     bctx.beginPath();bctx.arc(x,y,6*s,0,7);bctx.fill();
+     bctx.fillStyle='#5a5a5e';
+     bctx.beginPath();bctx.arc(x-2,y-2,4*s,0,7);bctx.fill();
+    }
+   }else{
+    if(d.s>1.1){
+     bctx.fillStyle='rgba(10,8,6,0.5)';
+     bctx.beginPath();bctx.ellipse(x+3,y+4,12*s,7*s,0,0,7);bctx.fill();
+     bctx.fillStyle='#1a1414';
+     bctx.beginPath();
+     bctx.moveTo(x,y-10*s);
+     bctx.lineTo(x+8*s,y-2*s);
+     bctx.lineTo(x+5*s,y+6*s);
+     bctx.lineTo(x-5*s,y+6*s);
+     bctx.lineTo(x-8*s,y-2*s);
+     bctx.closePath();bctx.fill();
+     bctx.fillStyle='rgba(180,80,180,0.4)';
+     bctx.beginPath();
+     bctx.moveTo(x-2*s,y-7*s);
+     bctx.lineTo(x+3*s,y-2*s);
+     bctx.lineTo(x-2*s,y+2*s);
+     bctx.closePath();bctx.fill();
+    }else{
+     bctx.fillStyle='#2a2020';
+     bctx.beginPath();bctx.arc(x,y,5*s,0,7);bctx.fill();
+     bctx.fillStyle='rgba(255,120,40,0.5)';
+     bctx.beginPath();bctx.arc(x-1,y-1,2*s,0,7);bctx.fill();
+    }
+   }
+  }
+ }
+}
+// ===== ЧАСТЬ 4 КОНЕЦ =====
+/* ============================================================
+   ТАНКИ: ГУСЕНИЦЫ, БАШНЯ, КОРПУС
+   ============================================================ */
+function tracks(S,x,y,w,h){
+ S.fillStyle='#1a1c16';
+ rr(S,x-w/2,y-h/2,w,h,4);S.fill();
+ S.fillStyle='#2e3226';
+ const off=(G.scroll*1.4)%8;
+ for(let i=-1;i<5;i++){
+  const ly=y-h/2+((i*8+off)%h);
+  S.fillRect(x-w/2+1,clamp(ly,y-h/2+1,y+h/2-3),w/2-2,3);
+  S.fillRect(x+1,clamp(ly,y-h/2+1,y+h/2-3),w/2-2,3);
+ }
+ S.fillStyle='rgba(150,180,120,0.15)';
+ S.fillRect(x-w/2+1,y-h/2+1,w-2,2);
+}
+
+function drawTurret(S,x,y,aim,gun,rec){
+ S.save();S.translate(x,y);S.rotate(aim+1.5708);
+ const rl=rec*4;
+ S.fillStyle='#2e3428';
+ if(gun===1)S.fillRect(-2.4,-24+rl,4.8,20);
+ else if(gun===2){S.fillRect(-5.4,-23+rl,3.8,18);S.fillRect(1.6,-23+rl,3.8,18);}
+ else if(gun===3)S.fillRect(-2.6,-26+rl,5.2,22);
+ else if(gun===4||gun===5)S.fillRect(-3.6,-28+rl,7.2,24);
+ else{
+  S.fillStyle='#1a2a3a';
+  S.fillRect(-2,-32+rl,4,26);
+  S.fillStyle='rgba(74,255,255,'+(0.5+0.3*Math.sin(G.t*15)).toFixed(2)+')';
+  S.fillRect(-1,-31+rl,2,24);
+ }
+ S.fillStyle='#1a1f16';
+ if(gun===1)S.fillRect(-3.2,-25+rl,6.4,3.4);
+ else if(gun===2){S.fillRect(-6.2,-24+rl,5,3);S.fillRect(1.2,-24+rl,5,3);}
+ else if(gun===3)S.fillRect(-3.4,-27+rl,6.8,3.6);
+ else if(gun===4||gun===5)S.fillRect(-4.6,-29+rl,9.2,4);
+ else{S.fillRect(-2.5,-33+rl,5,3);}
+ if(gun>=3){
+  S.fillStyle='#3a4030';
+  S.fillRect(-12,-14,3.4,12);S.fillRect(8.6,-14,3.4,12);
+  S.fillStyle='#565e48';
+  S.fillRect(-11.4,-16,2.2,3);S.fillRect(9.2,-16,2.2,3);
+ }
+ if(gun>=4){
+  S.fillStyle='#6a4a2a';
+  rr(S,-16,-8,6,10,2);S.fill();rr(S,10,-8,6,10,2);S.fill();
+  S.fillStyle='#ff8a3c';
+  for(let i=0;i<3;i++){S.fillRect(-15,-7+i*3,4,2);S.fillRect(11,-7+i*3,4,2);}
+ }
+ if(gun>=6){
+  S.fillStyle='#4affff';
+  S.shadowColor='#4affff';S.shadowBlur=8;
+  S.beginPath();S.arc(-8,-4,2.5,0,7);S.arc(8,-4,2.5,0,7);S.fill();
+  S.shadowBlur=0;
+ }
+ const tg=S.createLinearGradient(0,-10,0,10);
+ tg.addColorStop(0,'#8aa060');tg.addColorStop(0.5,'#5a7440');tg.addColorStop(1,'#3a4e2a');
+ S.fillStyle=tg;
+ rr(S,-9,-9,18,18,5);S.fill();
+ S.strokeStyle='#24301a';S.lineWidth=1.8;S.stroke();
+ S.fillStyle='#465e32';
+ S.beginPath();S.arc(0,2,4.4,0,7);S.fill();
+ S.strokeStyle='#24301a';S.lineWidth=1;S.stroke();
+ S.fillStyle='#6a8a4a';
+ S.beginPath();S.arc(-2,0,1.6,0,7);S.fill();
+ if(rec>0){
+  S.fillStyle='rgba(255,220,120,'+(rec*6).toFixed(2)+')';
+  S.beginPath();S.arc(0,-26,6+rec*20,0,7);S.fill();
+ }
+ S.restore();
+}
+
+/* ============================================================
+   ИГРОК
+   ============================================================ */
+function drawPlayerTank(){
+ const P=G.P,S=bctx;
+ const a=clamp((P.tx-P.x)*0.004,-0.25,0.25);
+ S.save();S.translate(Math.round(P.x),Math.round(P.y));
+ S.rotate(a);
+ if(P.inv>0&&Math.floor(G.t*14)%2===0)S.globalAlpha=0.4;
+
+ S.fillStyle='rgba(10,15,8,0.4)';
+ S.beginPath();S.ellipse(2,5,19,14,0,0,7);S.fill();
+
+ tracks(S,-13,0,7,30);
+ tracks(S,13,0,7,30);
+
+ for(let i=0;i<P.armor;i++){
+  S.fillStyle=['#8a9276','#9aa882','#a8b894','#b6c6a2','#c4d4b0'][i];
+  const py=-14+i*6;
+  rr(S,-19,py,4,5,1.5);S.fill();
+  rr(S,15,py,4,5,1.5);S.fill();
+  S.strokeStyle='#3a4430';S.lineWidth=0.8;
+  rr(S,-19,py,4,5,1.5);S.stroke();
+  rr(S,15,py,4,5,1.5);S.stroke();
+ }
+
+ const hg=S.createLinearGradient(-14,-16,14,16);
+ if((G.mission-1)%3===2){
+  hg.addColorStop(0,'#d8e2e8');hg.addColorStop(0.5,'#a8b4be');hg.addColorStop(1,'#6a7682');
+ }else if((G.mission-1)%3===1){
+  hg.addColorStop(0,'#9aa0a8');hg.addColorStop(0.5,'#6a7078');hg.addColorStop(1,'#4a5058');
+ }else{
+  hg.addColorStop(0,'#7e9458');hg.addColorStop(0.5,'#5a7440');hg.addColorStop(1,'#3a4e2a');
+ }
+ S.fillStyle=hg;
+ rr(S,-15,-16,30,32,5);S.fill();
+ S.strokeStyle='#24301a';S.lineWidth=2;S.stroke();
+
+ S.strokeStyle='rgba(30,40,20,0.6)';S.lineWidth=1;
+ S.beginPath();S.moveTo(-13,-5);S.lineTo(13,-5);S.stroke();
+ S.beginPath();S.moveTo(-13,7);S.lineTo(13,7);S.stroke();
+
+ S.fillStyle='#c8d4a8';
+ for(const bx of [-11,11])for(const by of [-12,11])S.fillRect(bx-1,by-1,2,2);
+
+ S.fillStyle='#2e3428';
+ for(let i=0;i<4;i++)S.fillRect(-11+i*6,-18,4,4);
+
+ S.fillStyle='#ffe9a8';
+ S.fillRect(-11,-17,3,2);S.fillRect(8,-17,3,2);
+
+ S.restore();
+
+ drawTurret(S,Math.round(P.x),Math.round(P.y),P.aim,P.gun,P.rec);
+
+ if(P.star>0){
+  const al=0.3+0.2*Math.sin(G.t*8);
+  S.strokeStyle='rgba(255,230,130,'+al.toFixed(2)+')';
+  S.lineWidth=3;
+  S.beginPath();S.arc(Math.round(P.x),Math.round(P.y),24+Math.sin(G.t*8)*2,0,7);S.stroke();
+  S.fillStyle='rgba(255,230,130,0.12)';
+  S.beginPath();S.arc(Math.round(P.x),Math.round(P.y),24,0,7);S.fill();
+ }
+}
+
+/* ============================================================
+   ВРАГИ: БАШНЯ (смотрит на игрока)
+   ============================================================ */
+function drawET(S,e,colD,colM,colL,aim){
+ S.save();S.translate(0,-2);S.rotate(aim+1.5708);
+ S.fillStyle=colD;
+ S.beginPath();S.arc(0,0,e.r*0.55,0,7);S.fill();
+ S.strokeStyle='rgba(10,12,6,0.8)';S.lineWidth=1.2;S.stroke();
+ S.fillStyle=colL;
+ S.fillRect(-1.6,-e.r*0.9-6,3.2,e.r*0.7);
+ S.fillStyle=colM;
+ S.beginPath();S.arc(0,1.5,e.r*0.28,0,7);S.fill();
+ S.restore();
+}
+
+/* ============================================================
+   ВРАГИ: 6 ТИПОВ
+   ============================================================ */
+function drawLite(e){
+ const S=bctx;
+ S.save();S.translate(Math.round(e.x),Math.round(e.y));
+ S.fillStyle='rgba(10,15,8,0.3)';
+ S.beginPath();S.ellipse(2,3,13,11,0,0,7);S.fill();
+ tracks(S,-8,0,5,22);tracks(S,8,0,5,22);
+ const hg=S.createLinearGradient(-10,-10,10,10);
+ hg.addColorStop(0,'#a8b06a');hg.addColorStop(0.5,'#7a8448');hg.addColorStop(1,'#4e542c');
+ S.fillStyle=hg;
+ rr(S,-10,-11,20,22,4);S.fill();
+ S.strokeStyle='#33361c';S.lineWidth=1.6;S.stroke();
+ S.fillStyle='#c9d4a8';S.fillRect(-7,-12,2,2);S.fillRect(5,-12,2,2);
+ drawET(S,e,'#4a5028','#8a9455','#3a3e20',Math.atan2(G.P.y-e.y,G.P.x-e.x));
+ S.restore();
+}
+
+function drawMed(e){
+ const S=bctx;
+ S.save();S.translate(Math.round(e.x),Math.round(e.y));
+ S.fillStyle='rgba(10,15,8,0.3)';
+ S.beginPath();S.ellipse(2,3,15,13,0,0,7);S.fill();
+ tracks(S,-10,0,6,26);tracks(S,10,0,6,26);
+ const hg=S.createLinearGradient(-12,-12,12,12);
+ hg.addColorStop(0,'#b09050');hg.addColorStop(0.5,'#8a6a34');hg.addColorStop(1,'#5a4420');
+ S.fillStyle=hg;
+ rr(S,-12,-13,24,26,4);S.fill();
+ S.strokeStyle='#3a2c12';S.lineWidth=1.8;S.stroke();
+ S.strokeStyle='rgba(50,38,14,0.6)';S.lineWidth=1;
+ S.beginPath();S.moveTo(-10,-4);S.lineTo(10,-4);S.stroke();
+ S.beginPath();S.moveTo(-10,6);S.lineTo(10,6);S.stroke();
+ S.fillStyle='#d8c890';S.fillRect(-8,-14,2,2);S.fillRect(6,-14,2,2);
+ drawET(S,e,'#4a3a14','#9a7a40','#2e2410',Math.atan2(G.P.y-e.y,G.P.x-e.x));
+ if(e.ft<0.35){
+  S.fillStyle='rgba(255,80,60,'+(0.4+0.4*Math.sin(G.t*20)).toFixed(2)+')';
+  S.beginPath();S.arc(9,4,2,0,7);S.fill();
+ }
+ S.restore();
+}
+
+function drawHeavy(e){
+ const S=bctx;
+ S.save();S.translate(Math.round(e.x),Math.round(e.y));
+ S.fillStyle='rgba(10,15,8,0.35)';
+ S.beginPath();S.ellipse(2,3,18,15,0,0,7);S.fill();
+ tracks(S,-13,0,7,30);tracks(S,13,0,7,30);
+ const hg=S.createLinearGradient(-14,-15,14,15);
+ hg.addColorStop(0,'#7a8890');hg.addColorStop(0.5,'#4e5860');hg.addColorStop(1,'#2c343c');
+ S.fillStyle=hg;
+ rr(S,-15,-15,30,30,5);S.fill();
+ S.strokeStyle='#181e24';S.lineWidth=2;S.stroke();
+ S.strokeStyle='rgba(20,26,32,0.7)';S.lineWidth=1.2;
+ S.beginPath();S.moveTo(-13,-6);S.lineTo(13,-6);S.stroke();
+ S.beginPath();S.moveTo(-13,4);S.lineTo(13,4);S.stroke();
+ S.fillStyle='#9aa4ac';
+ for(const bx of [-11,0,11])for(const by of [-11,10])S.fillRect(bx-1,by-1,2,2);
+ S.fillStyle='#c03030';S.fillRect(-12,-13,24,3);
+ drawET(S,e,'#20262c','#5a6670','#161c22',Math.atan2(G.P.y-e.y,G.P.x-e.x));
+ if(e.ft<0.4){
+  S.fillStyle='rgba(255,80,60,'+(0.5+0.5*Math.sin(G.t*20)).toFixed(2)+')';
+  S.beginPath();S.arc(10,4,2.4,0,7);S.fill();
+ }
+ S.restore();
+}
+
+function drawSniper(e){
+ const S=bctx;
+ S.save();S.translate(Math.round(e.x),Math.round(e.y));
+ S.fillStyle='rgba(10,15,8,0.3)';
+ S.beginPath();S.ellipse(2,3,12,10,0,0,7);S.fill();
+ tracks(S,-8,0,5,22);tracks(S,8,0,5,22);
+ const hg=S.createLinearGradient(-10,-10,10,10);
+ hg.addColorStop(0,'#3a2a3a');hg.addColorStop(0.5,'#2a1a2a');hg.addColorStop(1,'#1a0a1a');
+ S.fillStyle=hg;
+ rr(S,-10,-11,20,22,3);S.fill();
+ S.strokeStyle='#0a040a';S.lineWidth=1.6;S.stroke();
+ S.fillStyle='#1a0a1a';
+ S.fillRect(-1.5,-22,3,14);
+ const aimGlow=e.aiming?0.9:0.4;
+ S.fillStyle='rgba(255,40,60,'+aimGlow.toFixed(2)+')';
+ S.beginPath();S.arc(0,-4,3,0,7);S.fill();
+ S.fillStyle='rgba(255,150,160,0.7)';
+ S.beginPath();S.arc(0,-4,1.5,0,7);S.fill();
+ if(e.aiming){
+  S.strokeStyle='rgba(255,40,60,'+(0.3+0.3*Math.sin(G.t*15)).toFixed(2)+')';
+  S.lineWidth=1;
+  S.beginPath();S.moveTo(0,-22);
+  const dx=G.P.x-e.x,dy=G.P.y-e.y,d=Math.hypot(dx,dy)||1;
+  S.lineTo(dx/d*300,dy/d*300-22);
+  S.stroke();
+ }
+ S.restore();
+}
+
+function drawShield(e){
+ const S=bctx;
+ S.save();S.translate(Math.round(e.x),Math.round(e.y));
+ S.fillStyle='rgba(10,15,8,0.35)';
+ S.beginPath();S.ellipse(2,3,16,13,0,0,7);S.fill();
+ tracks(S,-11,0,6,28);tracks(S,11,0,6,28);
+ const hg=S.createLinearGradient(-13,-13,13,13);
+ hg.addColorStop(0,'#5a7a9a');hg.addColorStop(0.5,'#3a5a7a');hg.addColorStop(1,'#2a3a5a');
+ S.fillStyle=hg;
+ rr(S,-12,-13,24,26,4);S.fill();
+ S.strokeStyle='#0a1a2a';S.lineWidth=1.8;S.stroke();
+ S.fillStyle='#1a2a3a';
+ S.fillRect(-2.5,-24,5,18);
+ if(e.shield>0){
+  const shAlpha=0.3+0.15*Math.sin(G.t*4);
+  S.fillStyle='rgba(120,200,255,'+shAlpha.toFixed(2)+')';
+  S.beginPath();
+  S.moveTo(0,-22);S.lineTo(18,-16);S.lineTo(18,10);
+  S.lineTo(0,20);S.lineTo(-18,10);S.lineTo(-18,-16);
+  S.closePath();S.fill();
+  S.strokeStyle='rgba(180,240,255,0.7)';
+  S.lineWidth=1.5;S.stroke();
+ }
+ S.restore();
+}
+
+function drawSwarm(e){
+ const S=bctx;
+ S.save();S.translate(Math.round(e.x),Math.round(e.y));
+ S.fillStyle='rgba(10,15,8,0.3)';
+ S.beginPath();S.ellipse(1,2,8,5,0,0,7);S.fill();
+ const hg=S.createLinearGradient(0,-6,0,6);
+ hg.addColorStop(0,'#ff6a8a');hg.addColorStop(1,'#a02a4a');
+ S.fillStyle=hg;
+ S.beginPath();
+ S.moveTo(0,-7);S.lineTo(7,5);S.lineTo(-7,5);
+ S.closePath();S.fill();
+ S.strokeStyle='#3a0a1a';S.lineWidth=1.2;S.stroke();
+ S.fillStyle='#ffffff';
+ S.beginPath();S.arc(0,0,1.8,0,7);S.fill();
+ S.restore();
+}
+
+function drawEnemy(e){
+ if(e.fl>0)bctx.save();
+ if(e.k==='lite')drawLite(e);
+ else if(e.k==='med')drawMed(e);
+ else if(e.k==='hv')drawHeavy(e);
+ else if(e.k==='sniper')drawSniper(e);
+ else if(e.k==='shield')drawShield(e);
+ else if(e.k==='swarm')drawSwarm(e);
+ if(e.fl>0){
+  bctx.fillStyle='rgba(255,255,255,'+(e.fl*6).toFixed(2)+')';
+  bctx.beginPath();bctx.arc(Math.round(e.x),Math.round(e.y),e.r,0,7);bctx.fill();
+  bctx.restore();
+ }
+}
+
+/* ============================================================
+   СНАРЯДЫ
+   ============================================================ */
+function drawBullets(){
+ const S=bctx;
+ for(const b of G.bullets){
+  if(b.k===1){
+   S.strokeStyle='#ffe97a';S.lineWidth=2;
+   S.beginPath();S.moveTo(b.x,b.y);S.lineTo(b.x-b.vx*0.02,b.y-b.vy*0.02);S.stroke();
+  }else if(b.k===2){
+   S.save();S.translate(b.x,b.y);S.rotate(Math.atan2(b.vy,b.vx)+1.5708);
+   S.fillStyle='rgba(255,150,60,0.4)';
+   S.beginPath();S.moveTo(-2,4);S.lineTo(0,12+Math.random()*5);S.lineTo(2,4);S.closePath();S.fill();
+   S.fillStyle='#8a9276';rr(S,-2.4,-6,4.8,12,2);S.fill();
+   S.fillStyle='#c03030';S.fillRect(-2.4,-6,4.8,3.4);
+   S.restore();
+  }else if(b.k===3){
+   S.save();
+   S.globalAlpha=0.8+0.2*Math.sin(G.t*30);
+   S.strokeStyle='#4affff';S.lineWidth=6;
+   S.shadowColor='#4affff';S.shadowBlur=15;
+   S.beginPath();S.moveTo(b.x,b.y);S.lineTo(b.x-b.vx*0.04,b.y-b.vy*0.04);S.stroke();
+   S.strokeStyle='#ffffff';S.lineWidth=2;
+   S.beginPath();S.moveTo(b.x,b.y);S.lineTo(b.x-b.vx*0.04,b.y-b.vy*0.04);S.stroke();
+   S.shadowBlur=0;
+   S.restore();
+  }else{
+   const w=b.big?3.4:2.6,h2=b.big?16:13;
+   S.fillStyle='rgba(255,220,120,0.4)';
+   rr(S,b.x-w,b.y-h2/2,w*2,h2,2.4);S.fill();
+   const g=S.createLinearGradient(0,b.y-6,0,b.y+6);
+   g.addColorStop(0,'#fffbe0');g.addColorStop(0.5,'#ffd23f');g.addColorStop(1,'rgba(200,120,20,0.2)');
+   S.fillStyle=g;
+   rr(S,b.x-1.5,b.y-6,3,11,1.4);S.fill();
+  }
+ }
+ for(const b of G.ebullets){
+  if(b.h){
+   S.save();S.translate(b.x,b.y);S.rotate(Math.atan2(b.vy,b.vx)+1.5708);
+   S.fillStyle='rgba(255,150,60,0.4)';
+   S.beginPath();S.moveTo(-2,4);S.lineTo(0,11+Math.random()*4);S.lineTo(2,4);S.closePath();S.fill();
+   S.fillStyle='#7a4a2a';rr(S,-2.6,-6,5.2,12,2);S.fill();
+   S.restore();
+  }else if(b.laser){
+   S.strokeStyle='rgba(255,40,60,0.9)';S.lineWidth=2.5;
+   S.shadowColor='#ff4060';S.shadowBlur=10;
+   S.beginPath();S.moveTo(b.x,b.y);S.lineTo(b.x-b.vx*0.03,b.y-b.vy*0.03);S.stroke();
+   S.shadowBlur=0;
+  }else{
+   const g=S.createRadialGradient(b.x-1,b.y-1,0.5,b.x,b.y,4.6);
+   g.addColorStop(0,'#fff4d0');g.addColorStop(0.5,'#ff9a3c');g.addColorStop(1,'rgba(200,40,20,0.2)');
+   S.fillStyle=g;
+   S.beginPath();S.arc(b.x,b.y,4.4,0,7);S.fill();
+  }
+ }
+}
+// ===== ЧАСТЬ 5 КОНЕЦ =====
+/* ============================================================
+   ОТРИСОВКА: БОССЫ (6 типов)
+   ============================================================ */
+function drawBoss(){
+ const B=G.boss,S=bctx;
+ if(B.dying&&Math.floor(G.t*16)%2===0)S.globalAlpha=0.6;
+ S.save();S.translate(Math.round(B.x),Math.round(B.y));
+ const aim=Math.atan2(G.P.y-B.y,G.P.x-B.x);
+
+ /* ===== 0: СТАЛЬНОЙ ГРОМ ===== */
+ if(B.type===0){
+  S.fillStyle='rgba(10,15,8,0.4)';
+  S.beginPath();S.ellipse(3,5,54,32,0,0,7);S.fill();
+  tracks(S,-46,0,13,56);tracks(S,46,0,13,56);
+  S.fillStyle='#2c343c';rr(S,-58,-4,18,14,3);S.fill();rr(S,40,-4,18,14,3);S.fill();
+  const hg=S.createLinearGradient(0,-26,0,26);
+  hg.addColorStop(0,'#6a7a84');hg.addColorStop(0.5,'#414c56');hg.addColorStop(1,'#242c34');
+  S.fillStyle=hg;rr(S,-52,-24,104,48,8);S.fill();
+  S.strokeStyle='#141a20';S.lineWidth=2.6;S.stroke();
+  S.strokeStyle='rgba(18,24,30,0.7)';S.lineWidth=1.4;
+  S.beginPath();S.moveTo(-48,-10);S.lineTo(48,-10);S.stroke();
+  S.beginPath();S.moveTo(-48,8);S.lineTo(48,8);S.stroke();
+  S.fillStyle='#8a94a0';
+  for(const bx of [-40,-20,0,20,40])for(const by of [-20,16])S.fillRect(bx-1.5,by-1.5,3,3);
+  S.fillStyle='#c03030';S.fillRect(-48,-22,96,4);
+  for(const tx of [-24,24]){
+   S.save();S.translate(tx,-6);S.rotate(aim+1.5708);
+   S.fillStyle='#39434d';rr(S,-8,-8,16,16,4);S.fill();
+   S.strokeStyle='#141a20';S.lineWidth=1.6;S.stroke();
+   S.fillStyle='#1a2028';S.fillRect(-2.6,-30,5.2,24);
+   S.fillStyle='#2a323a';S.fillRect(-3.6,-32,7.2,4);
+   if(B.tier>=1){
+    S.fillStyle='#4a545e';S.fillRect(-13,-12,3.4,9);S.fillRect(9.6,-12,3.4,9);
+   }
+   if(B.tier>=2){
+    S.fillStyle='#6a4a2a';rr(S,-17,-6,6,9,2);S.fill();rr(S,11,-6,6,9,2);S.fill();
+    S.fillStyle='#ff8a3c';S.fillRect(-16,-5,4,2);S.fillRect(12,-5,4,2);
+   }
+   S.restore();
+  }
+  const pl=0.6+0.4*Math.sin(G.t*4);
+  const cg=S.createRadialGradient(0,8,2,0,8,10);
+  cg.addColorStop(0,'#fff');cg.addColorStop(0.4,'rgba(255,120,60,'+pl.toFixed(2)+')');cg.addColorStop(1,'rgba(180,40,20,0)');
+  S.fillStyle=cg;S.beginPath();S.arc(0,8,10,0,7);S.fill();
+  S.strokeStyle='#5a1a08';S.lineWidth=1.6;S.stroke();
+ }
+
+ /* ===== 1: ОСА ===== */
+ else if(B.type===1){
+  S.fillStyle='rgba(10,15,8,0.2)';
+  S.beginPath();S.ellipse(6,30,42,14,0,0,7);S.fill();
+  const wingFlap=Math.sin(B.t*20)*10;
+  S.fillStyle='rgba(180,200,240,0.35)';
+  S.strokeStyle='rgba(200,220,255,0.7)';S.lineWidth=1.5;
+  S.beginPath();S.ellipse(-30,-10+wingFlap*0.3,22,8,-0.4,0,7);S.fill();S.stroke();
+  S.beginPath();S.ellipse(30,-10+wingFlap*0.3,22,8,0.4,0,7);S.fill();S.stroke();
+  S.beginPath();S.ellipse(-22,12-wingFlap*0.3,16,6,-0.4,0,7);S.fill();S.stroke();
+  S.beginPath();S.ellipse(22,12-wingFlap*0.3,16,6,0.4,0,7);S.fill();S.stroke();
+  const hg=S.createLinearGradient(0,-20,0,20);
+  hg.addColorStop(0,'#ffd23f');hg.addColorStop(0.5,'#ff8a3c');hg.addColorStop(1,'#8a2a14');
+  S.fillStyle=hg;
+  S.beginPath();S.ellipse(0,0,26,20,0,0,7);S.fill();
+  S.strokeStyle='#3a1208';S.lineWidth=2.4;S.stroke();
+  S.fillStyle='#1a0a04';
+  for(let i=0;i<3;i++)S.fillRect(-24+i*10-2,-16,6,32);
+  S.fillStyle='#ff2020';
+  S.beginPath();S.arc(-8,-4,4,0,7);S.arc(8,-4,4,0,7);S.fill();
+  S.fillStyle='#ffffff';
+  S.beginPath();S.arc(-7,-5,1.5,0,7);S.arc(9,-5,1.5,0,7);S.fill();
+  S.fillStyle='#1a0a04';
+  S.beginPath();S.moveTo(0,18);S.lineTo(4,32);S.lineTo(-4,32);S.closePath();S.fill();
+  if(B.tier>=1){
+   S.fillStyle='#4a545e';
+   S.fillRect(-18,-22,8,6);S.fillRect(10,-22,8,6);
+  }
+  if(B.tier>=2){
+   S.fillStyle='#6a4a2a';
+   rr(S,-30,10,6,10,2);S.fill();rr(S,24,10,6,10,2);S.fill();
+   S.fillStyle='#ff8a3c';
+   S.fillRect(-29,11,4,3);S.fillRect(25,11,4,3);
+  }
+ }
+
+ /* ===== 2: КУЗНЕЦ ===== */
+ else if(B.type===2){
+  S.fillStyle='rgba(10,15,8,0.45)';
+  S.beginPath();S.ellipse(3,6,58,34,0,0,7);S.fill();
+  tracks(S,-48,0,14,64);tracks(S,48,0,14,64);
+  const hg=S.createLinearGradient(0,-30,0,30);
+  hg.addColorStop(0,'#6a6a7a');hg.addColorStop(0.5,'#3a3a4a');hg.addColorStop(1,'#1a1a2a');
+  S.fillStyle=hg;
+  rr(S,-54,-30,108,60,10);S.fill();
+  S.strokeStyle='#0a0a14';S.lineWidth=2.8;S.stroke();
+  S.fillStyle='#ffd23f';
+  for(let i=0;i<6;i++)S.fillRect(-50+i*18,-26,8,6);
+  S.fillStyle='#1a1a1a';
+  for(let i=0;i<5;i++)S.fillRect(-42+i*18,-26,4,6);
+  const cg=S.createRadialGradient(0,0,4,0,0,22);
+  cg.addColorStop(0,'#fff4a0');cg.addColorStop(0.4,'#ff8a3c');cg.addColorStop(1,'rgba(180,40,20,0.1)');
+  S.fillStyle=cg;S.beginPath();S.arc(0,0,22,0,7);S.fill();
+  S.strokeStyle='#5a1a08';S.lineWidth=2;S.stroke();
+  const hammerAngle=Math.sin(B.t*3)*0.5+(B.chgT?B.chgT*3:0);
+  S.save();S.translate(40,-10);S.rotate(hammerAngle);
+  S.fillStyle='#2a2a2a';
+  S.fillRect(-4,0,8,40);
+  S.fillStyle='#4a4a5a';
+  rr(S,-14,36,28,16,4);S.fill();
+  S.strokeStyle='#1a1a1a';S.lineWidth=1.6;S.stroke();
+  S.restore();
+  S.fillStyle='#3a3a4a';
+  S.fillRect(20,-18,20,10);
+  if(B.tier>=1){
+   S.fillStyle='#4a545e';
+   S.fillRect(-44,-24,12,8);
+  }
+  if(B.tier>=2){
+   S.fillStyle='#6a4a2a';
+   rr(S,-60,-10,8,14,2);S.fill();rr(S,52,-10,8,14,2);S.fill();
+   S.fillStyle='#ff8a3c';
+   S.fillRect(-59,-9,4,3);S.fillRect(53,-9,4,3);
+  }
+ }
+
+ /* ===== 3: ПРИЗРАК ===== */
+ else if(B.type===3){
+  const flicker=0.7+0.3*Math.sin(B.t*8);
+  S.globalAlpha*=flicker;
+  const ag=S.createRadialGradient(0,0,4,0,0,50);
+  ag.addColorStop(0,'rgba(180,120,255,0.5)');
+  ag.addColorStop(0.5,'rgba(120,60,200,0.2)');
+  ag.addColorStop(1,'rgba(80,20,140,0)');
+  S.fillStyle=ag;S.beginPath();S.arc(0,0,50,0,7);S.fill();
+  S.globalAlpha*=0.7;
+  tracks(S,-42,0,12,50);tracks(S,42,0,12,50);
+  S.globalAlpha/=0.7;
+  const hg=S.createLinearGradient(0,-26,0,26);
+  hg.addColorStop(0,'#8a7dff');hg.addColorStop(0.5,'#5a4aa8');hg.addColorStop(1,'#2a1a5a');
+  S.fillStyle=hg;
+  rr(S,-46,-26,92,52,8);S.fill();
+  S.strokeStyle='#1a0a3a';S.lineWidth=2.4;S.stroke();
+  for(let i=0;i<4;i++){
+   const cx=-30+i*20,cy=Math.sin(B.t*2+i)*4;
+   S.fillStyle='rgba(200,160,255,'+(0.6+0.4*Math.sin(B.t*4+i)).toFixed(2)+')';
+   S.beginPath();
+   S.moveTo(cx,cy-10);S.lineTo(cx+5,cy-2);S.lineTo(cx,cy+8);S.lineTo(cx-5,cy-2);
+   S.closePath();S.fill();
+  }
+  S.save();S.translate(0,-8);S.rotate(aim+1.5708);
+  S.fillStyle='#3a2a6a';rr(S,-10,-10,20,20,4);S.fill();
+  S.fillStyle='#a080ff';
+  S.beginPath();S.arc(0,0,7,0,7);S.fill();
+  S.fillStyle='#ffffff';
+  S.beginPath();S.arc(0,0,3,0,7);S.fill();
+  S.fillStyle='#1a0a3a';S.fillRect(-1.6,-26,3.2,18);
+  S.fillStyle='#a080ff';
+  S.beginPath();S.arc(0,-26,4,0,7);S.fill();
+  S.restore();
+  if(B.tier>=1){
+   S.fillStyle='#4a545e';
+   S.fillRect(-38,-20,8,6);S.fillRect(30,-20,8,6);
+  }
+  if(B.tier>=2){
+   S.fillStyle='#6a4a2a';
+   rr(S,-52,-8,6,10,2);S.fill();rr(S,46,-8,6,10,2);S.fill();
+  }
+  S.globalAlpha/=flicker;
+ }
+
+ /* ===== 4: МАМОНТ ===== */
+ else if(B.type===4){
+  S.fillStyle='rgba(10,15,8,0.4)';
+  S.beginPath();S.ellipse(3,6,60,34,0,0,7);S.fill();
+  tracks(S,-48,-12,12,44);tracks(S,48,-12,12,44);
+  tracks(S,-48,14,12,44);tracks(S,48,14,12,44);
+  const hg=S.createLinearGradient(0,-30,0,30);
+  hg.addColorStop(0,'#9a8a5a');hg.addColorStop(0.5,'#6e6034');hg.addColorStop(1,'#3e3418');
+  S.fillStyle=hg;rr(S,-56,-30,112,60,10);S.fill();
+  S.strokeStyle='#241c0a';S.lineWidth=2.8;S.stroke();
+  S.strokeStyle='rgba(30,24,8,0.7)';S.lineWidth=1.4;
+  for(let i=0;i<3;i++){S.beginPath();S.moveTo(-52,-16+i*14);S.lineTo(52,-16+i*14);S.stroke();}
+  S.fillStyle='#c0d0a0';
+  for(const bx of [-44,-22,0,22,44])for(const by of [-24,-6,12,24])S.fillRect(bx-1.5,by-1.5,3,3);
+  S.fillStyle='#c03030';S.fillRect(-52,-28,104,4);
+  S.save();S.translate(0,-4);S.rotate(aim+1.5708);
+  S.fillStyle='#4e5838';rr(S,-12,-12,24,24,6);S.fill();
+  S.strokeStyle='#241c0a';S.lineWidth=2;S.stroke();
+  S.fillStyle='#1e2414';S.fillRect(-6,-34,12,24);
+  S.fillStyle='#2e361e';S.fillRect(-8,-36,16,5);
+  S.restore();
+  for(const tx of [-38,38]){
+   S.save();S.translate(tx,6);S.rotate(aim+1.5708);
+   S.fillStyle='#3e4626';rr(S,-6,-6,12,12,3);S.fill();
+   S.fillStyle='#1e2414';S.fillRect(-1.8,-24,3.6,19);
+   S.restore();
+  }
+  if(B.tier>=1){
+   S.fillStyle='#4a545e';
+   S.fillRect(-30,20,4,10);S.fillRect(26,20,4,10);
+  }
+  if(B.tier>=2){
+   S.fillStyle='#6a4a2a';rr(S,-58,-10,6,14,2);S.fill();rr(S,52,-10,6,14,2);S.fill();
+   S.fillStyle='#ff8a3c';S.fillRect(-57,-9,4,3);S.fillRect(53,-9,4,3);
+  }
+ }
+
+ /* ===== 5: КРЕМЕНЬ ===== */
+ else if(B.type===5){
+  S.fillStyle='rgba(10,15,8,0.4)';
+  S.beginPath();S.ellipse(3,5,58,36,0,0,7);S.fill();
+  tracks(S,-50,-6,12,58);tracks(S,50,-6,12,58);
+  S.save();S.rotate(G.t*0.7);
+  S.strokeStyle='#39434d';S.lineWidth=7;
+  for(let i=0;i<6;i++){S.beginPath();S.arc(0,0,50,i*1.047,i*1.047+0.68);S.stroke();}
+  S.restore();
+  for(let i=0;i<6;i++){
+   const a=G.t*0.7+i*1.047+0.34;
+   S.fillStyle='rgba(255,120,60,'+(0.4+0.3*Math.sin(G.t*6+i)).toFixed(2)+')';
+   S.beginPath();S.arc(Math.cos(a)*50,Math.sin(a)*50,2.6,0,7);S.fill();
+  }
+  const hg=S.createRadialGradient(-8,-10,4,0,0,46);
+  hg.addColorStop(0,'#7a8890');hg.addColorStop(0.5,'#414c56');hg.addColorStop(1,'#1c242c');
+  S.fillStyle=hg;
+  S.beginPath();
+  for(let i=0;i<8;i++){
+   const a2=Math.PI/8+i*Math.PI/4;
+   i?S.lineTo(Math.cos(a2)*40,Math.sin(a2)*40):S.moveTo(Math.cos(a2)*40,Math.sin(a2)*40);
+  }
+  S.closePath();S.fill();
+  S.strokeStyle='#10141f';S.lineWidth=2.6;S.stroke();
+  S.strokeStyle='rgba(14,18,24,0.7)';S.lineWidth=1.2;
+  for(let i=0;i<8;i++){
+   const a2=Math.PI/8+i*Math.PI/4;
+   S.beginPath();S.moveTo(Math.cos(a2)*14,Math.sin(a2)*14);S.lineTo(Math.cos(a2)*38,Math.sin(a2)*38);S.stroke();
+  }
+  for(const tx of [-22,22]){
+   S.save();S.translate(tx,10);S.rotate(aim+1.5708);
+   S.fillStyle='#39434d';rr(S,-7,-7,14,14,3);S.fill();
+   S.fillStyle='#141a20';S.fillRect(-2,-24,4,18);
+   S.restore();
+  }
+  S.save();S.translate(0,-6);S.rotate(aim+1.5708);
+  S.fillStyle='#4e5860';rr(S,-11,-11,22,22,6);S.fill();
+  S.strokeStyle='#10141f';S.lineWidth=2;S.stroke();
+  S.fillStyle='#1a2028';S.fillRect(-3.4,-36,6.8,26);
+  S.fillStyle='#2a323a';S.fillRect(-4.6,-38,9.2,5);
+  S.restore();
+  if(B.tier>=1){
+   S.fillStyle='#4a545e';
+   S.fillRect(-34,18,3.4,10);S.fillRect(30,18,3.4,10);
+  }
+  if(B.tier>=2){
+   S.fillStyle='#6a4a2a';rr(S,-60,-8,6,14,2);S.fill();rr(S,54,-8,6,14,2);S.fill();
+   S.fillStyle='#ff8a3c';S.fillRect(-59,-7,4,3);S.fillRect(55,-7,4,3);
+  }
+ }
+ S.restore();
+ S.globalAlpha=1;
+}
+
+/* ============================================================
+   ЯЩИКИ
+   ============================================================ */
+function drawCrates(){
+ for(const d of G.crates){
+  const S=bctx;
+  S.save();S.translate(Math.round(d.x),Math.round(d.y));
+  const col=d.k==='g'?'#ffd23f':d.k==='m'?'#ffb04a':d.k==='r'?'#ff8a3c':
+            d.k==='h'?'#ff6a6a':d.k==='a'?'#9ab890':d.k==='s'?'#ffe97a':
+            d.k==='L'?'#4affff':'#7fdd8a';
+  S.fillStyle='rgba(10,15,8,0.3)';
+  S.beginPath();S.ellipse(2,4,12,7,0,0,7);S.fill();
+  const bg=S.createLinearGradient(0,-10,0,10);
+  bg.addColorStop(0,'#6a5a3a');bg.addColorStop(1,'#3a3020');
+  S.fillStyle=bg;
+  rr(S,-11,-10,22,20,3);S.fill();
+  S.strokeStyle='#241c0e';S.lineWidth=1.6;S.stroke();
+  S.strokeStyle='rgba(36,28,14,0.8)';S.lineWidth=1;
+  S.beginPath();S.moveTo(-11,-3);S.lineTo(11,-3);S.stroke();
+  S.beginPath();S.moveTo(-11,4);S.lineTo(11,4);S.stroke();
+  S.fillStyle=col;
+  S.font='bold 11px system-ui';S.textBaseline='middle';S.textAlign='center';
+  S.fillText(d.k==='g'?'G':d.k==='m'?'M':d.k==='r'?'R':d.k==='h'?'H':
+             d.k==='a'?'A':d.k==='s'?'★':d.k==='L'?'L':d.k==='$'?'$':'+',0,1);
+  S.textAlign='left';
+  S.globalAlpha=0.25+0.15*Math.sin(G.t*5+d.ph);
+  S.strokeStyle=col;S.lineWidth=1;
+  rr(S,-13,-12,26,24,4);S.stroke();
+  S.globalAlpha=1;
+  S.restore();
+ }
+}
+
+/* ============================================================
+   ПРЕПЯТСТВИЯ (детерминированные — обломки не «танцуют»)
+   ============================================================ */
+function drawObstacles(){
+ const S=bctx,m=(G.mission-1)%3;
+ for(const o of G.obstacles){
+  const x=Math.round(o.x),y=Math.round(o.y);
+  if(o.crushed){
+   S.fillStyle='rgba(30,30,22,0.45)';
+   S.beginPath();S.ellipse(x,y,22,10,0,0,7);S.fill();
+   S.fillStyle='#4a4434';
+   const seed=Math.round(o.x*7)+1;
+   for(let i=0;i<4;i++)S.fillRect(x-14+i*8,y-3+h1(i*3+seed)*5,3,2);
+   continue;
+  }
+  if(o.k==='wire'){
+   S.fillStyle='#4a4234';
+   S.fillRect(x-20,y-2,3,8);S.fillRect(x+17,y-2,3,8);
+   S.strokeStyle='#8a8a7a';S.lineWidth=1;
+   S.beginPath();S.moveTo(x-20,y);S.lineTo(x+20,y+1);S.stroke();
+   S.beginPath();S.moveTo(x-20,y+4);S.lineTo(x+20,y+5);S.stroke();
+   S.strokeStyle='#5a5848';
+   for(let i=-3;i<=3;i++){
+    S.beginPath();S.moveTo(x+i*6,y-1);S.lineTo(x+i*6+3,y+6);S.stroke();
+   }
+  }else if(o.k==='fence'){
+   S.fillStyle=m===2?'#7a6a4a':'#6a5232';
+   for(let i=-2;i<=2;i++)S.fillRect(x+i*8-2.5,y-8,5,16);
+   S.fillStyle=m===2?'#5a4c34':'#4a3a20';
+   S.fillRect(x-20,y-3,40,3);
+   S.strokeStyle='rgba(20,14,6,0.7)';S.lineWidth=1;
+   S.strokeRect(x-21,y-9,42,18);
+  }else if(o.k==='rock'||o.k==='obsidian'){
+   S.fillStyle='rgba(10,15,8,0.3)';
+   S.beginPath();S.ellipse(x+2,y+4,13,7,0,0,7);S.fill();
+   if(o.k==='obsidian'){
+    S.fillStyle='#1a1414';
+    S.beginPath();
+    S.moveTo(x,y-10);S.lineTo(x+10,y-2);S.lineTo(x+8,y+8);
+    S.lineTo(x-8,y+8);S.lineTo(x-10,y-2);S.closePath();S.fill();
+    S.fillStyle='rgba(180,80,180,0.5)';
+    S.beginPath();
+    S.moveTo(x-3,y-7);S.lineTo(x+4,y-2);S.lineTo(x-3,y+4);S.closePath();S.fill();
+   }else{
+    S.fillStyle='#6a6458';
+    S.beginPath();S.ellipse(x,y,12,9,0.3,0,7);S.fill();
+    S.fillStyle='#8a8478';
+    S.beginPath();S.ellipse(x-3,y-3,7,5,0.3,0,7);S.fill();
+   }
+  }else if(o.k==='barrel'){
+   const bg=S.createLinearGradient(x-8,0,x+8,0);
+   bg.addColorStop(0,'#a83434');bg.addColorStop(0.5,'#d84848');bg.addColorStop(1,'#7a1e1e');
+   S.fillStyle=bg;
+   rr(S,x-8,y-9,16,18,3);S.fill();
+   S.strokeStyle='#4a1212';S.lineWidth=1.4;S.stroke();
+   S.fillStyle='#e8d84a';
+   S.fillRect(x-8,y-4,16,3);S.fillRect(x-8,y+2,16,3);
+  }else if(o.k==='block'){
+   S.fillStyle='rgba(10,15,8,0.3)';
+   S.beginPath();S.ellipse(x+2,y+4,18,8,0,0,7);S.fill();
+   S.fillStyle='#5a5a5e';
+   S.fillRect(x-16,y-8,32,16);
+   S.fillStyle='#7a7a7e';
+   S.fillRect(x-16,y-8,32,3);
+   S.strokeStyle='#2a2a2e';S.lineWidth=1.4;
+   S.strokeRect(x-16,y-8,32,16);
+   S.strokeStyle='#1a1a1e';S.lineWidth=1;
+   S.beginPath();S.moveTo(x-8,y-4);S.lineTo(x-2,y+2);S.lineTo(x+4,y-2);S.stroke();
+  }else if(o.k==='rubble'){
+   const seed=Math.round(o.x*7)+1;
+   S.fillStyle='#4a4a4e';
+   for(let i=0;i<4;i++){
+    const rx=x+(h1(i*3+seed)-0.5)*20;
+    const ry=y+(h1(i*5+seed)-0.5)*10;
+    S.fillRect(rx-3,ry-2,6,4);
+   }
+  }else if(o.k==='lava'){
+   const glow=0.5+0.4*Math.sin(G.t*4+o.x);
+   const lg=S.createLinearGradient(x-15,0,x+15,0);
+   lg.addColorStop(0,'rgba(255,80,20,0)');
+   lg.addColorStop(0.5,'rgba(255,120,40,'+glow.toFixed(2)+')');
+   lg.addColorStop(1,'rgba(255,80,20,0)');
+   S.fillStyle=lg;
+   S.fillRect(x-15,y-4,30,8);
+   S.fillStyle='#ff8a3c';
+   S.fillRect(x-10,y-2,20,4);
+   S.fillStyle='#ffe080';
+   S.fillRect(x-6,y-1,12,2);
+  }
+ }
+}
+
+/* ============================================================
+   ЧАСТИЦЫ
+   ============================================================ */
+function drawParticles(){
+ for(const r of G.rings){
+  bctx.strokeStyle='rgba('+r.c+','+(r.life*0.7).toFixed(3)+')';
+  bctx.lineWidth=2;
+  bctx.beginPath();bctx.arc(r.x,r.y,r.r,0,7);bctx.stroke();
+ }
+ for(const p of G.parts){
+  bctx.globalAlpha=Math.min(1,p.life*2);
+  bctx.fillStyle=p.c;
+  bctx.fillRect(Math.round(p.x),Math.round(p.y),p.s,p.s);
+ }
+ bctx.globalAlpha=1;
+ for(const p of G.pops){
+  bctx.globalAlpha=Math.min(1,p.life);
+  drawText(p.t,p.x,p.y,p.sc,p.c,'center');
+  bctx.globalAlpha=1;
+ }
+}
+// ===== ЧАСТЬ 6 КОНЕЦ =====
+/* ============================================================
+   HUD
+   ============================================================ */
+function drawPanel(x,y,w,h){
+ bctx.fillStyle='rgba(12,14,10,0.92)';
+ rr(bctx,x,y,w,h,10);bctx.fill();
+ bctx.lineWidth=2;bctx.strokeStyle='#5a7a3a';bctx.stroke();
+ bctx.lineWidth=1;bctx.strokeStyle='rgba(150,180,100,0.35)';
+ rr(bctx,x+3,y+3,w-6,h-6,8);bctx.stroke();
+}
+function drawBtn(b,label,c1,c2){
+ bctx.fillStyle=c1;rr(bctx,b.x,b.y,b.w,b.h,8);bctx.fill();
+ bctx.lineWidth=2;bctx.strokeStyle=c2;bctx.stroke();
+ drawText(label,b.x+b.w/2,b.y+b.h/2-6,1,'#fdfdf6','center');
+}
+
+function drawHUD(){
+ drawText('СЧЁТ '+fmt(G.score),6,5,1,'#ffe9a8');
+ drawText('МИССИЯ '+((G.mission-1)%3+1)+' · ВОЛНА '+G.wave,LW/2,5,0.9,'#ffd23f','center');
+ drawText('РЕКОРД '+fmt(G.best),LW-6,5,1,'#8a92a8','right');
+
+ for(let i=0;i<G.lives;i++){
+  const hx=LW-18-i*15,hy=26;
+  bctx.fillStyle='#4a5a2a';
+  bctx.fillRect(hx-5,hy-2,10,6);
+  bctx.fillStyle='#7fdd8a';
+  bctx.fillRect(hx-4,hy-3,8,5);
+  bctx.fillRect(hx-1,hy-6,2.5,4);
+ }
+
+ const gunNames=['ПУШКА','СПАРКА','+ПУЛЕМЁТ','+РАКЕТЫ','ТЯЖЁЛОЕ','ЛАЗЕР'];
+ drawText('ОРУДИЕ: '+gunNames[Math.min(5,G.P.gun-1)],6,19,0.72,'#c9d4a8');
+
+ for(let i=0;i<G.P.armor;i++){
+  bctx.fillStyle=['#8a9276','#9aa882','#a8b894','#b6c6a2','#c4d4b0'][i];
+  rr(bctx,6+i*11,30,9,6,1.5);bctx.fill();
+  bctx.strokeStyle='#3a4430';bctx.lineWidth=0.8;
+  rr(bctx,6+i*11,30,9,6,1.5);bctx.stroke();
+ }
+
+ if(G.P.star>0){
+  bctx.fillStyle='rgba(255,230,130,0.25)';
+  rr(bctx,LW-90,30,84,8,4);bctx.fill();
+  bctx.fillStyle='#ffe97a';
+  rr(bctx,LW-90,30,84*(G.P.star/8),8,4);bctx.fill();
+  drawText('ЗВЕЗДА',LW-48,41,0.7,'#ffe97a','center');
+ }
+
+ if(G.streak>0)
+  drawText('РУБКА X'+G.streak,LW-6,44,0.75,'#cfe8ff','right');
+
+ if(G.boss&&!G.boss.dying&&G.boss.entered){
+  const bw=LW-120,bx=60,by=46;
+  bctx.fillStyle='rgba(16,18,10,0.85)';
+  rr(bctx,bx-3,by-3,bw+6,10,5);bctx.fill();
+  bctx.strokeStyle='#ff6a6a';bctx.lineWidth=1;bctx.stroke();
+  const frac=clamp(G.boss.hp/G.boss.maxhp,0,1);
+  const g=bctx.createLinearGradient(bx,0,bx+bw,0);
+  g.addColorStop(0,'#ff5a5a');g.addColorStop(1,'#ffb04a');
+  bctx.fillStyle=g;
+  rr(bctx,bx,by,bw*frac,4.4,2);bctx.fill();
+  drawText(G.bossName||'БОСС',LW/2,by-14,0.9,'#ff6a6a','center');
+ }
+
+ if(G.bossWarn>0&&Math.floor(G.t*6)%2===0){
+  drawText('!! ВНИМАНИЕ !!',LW/2,LH*0.3,1.6,'#ff6a6a','center');
+  drawText('К БОЮ ГОТОВНОСТЬ',LW/2,LH*0.3+24,1.1,'#ffd23f','center');
+ }
+
+ if(G.bannerT>0){
+  const a=Math.min(1,G.bannerT*2);
+  bctx.globalAlpha=a;
+  drawText(G.banner,LW/2,LH*0.32,1.4,G.bannerC,'center');
+  bctx.globalAlpha=1;
+ }
+
+ if(!G.muted){
+  bctx.fillStyle='#8a92a8';bctx.fillRect(LW-18,LH-16,3,5);
+  bctx.fillRect(LW-13,LH-18,2,9);bctx.fillRect(LW-10,LH-15,2,3);
+ }else{
+  bctx.fillStyle='#5a4030';bctx.fillRect(LW-18,LH-16,3,5);
+  bctx.fillRect(LW-13,LH-18,2,9);bctx.fillRect(LW-10,LH-15,2,3);
+  bctx.strokeStyle='#ff4040';bctx.lineWidth=1.5;
+  bctx.beginPath();bctx.moveTo(LW-19,LH-19);bctx.lineTo(LW-8,LH-6);bctx.stroke();
+ }
+}
+
+/* ============================================================
+   МЕНЮ
+   ============================================================ */
+function drawMenu(){
+ drawPlayerTank();
+ bctx.fillStyle='rgba(12,14,10,0.6)';bctx.fillRect(0,0,LW,LH);
+ drawText('СТАЛЬНОЙ РУБЕЖ 2',LW/2,42,2.4,'#ffd23f','center');
+ drawText('ТАНКОВЫЙ ШУТЕР · ВИД СВЕРХУ',LW/2,80,0.95,'#a8b49a','center');
+ drawText('НОВЫЕ ЗОНЫ: РУИНЫ · ВУЛКАН',LW/2,100,0.85,'#ff9a6a','center');
+ drawText('НОВЫЕ БОССЫ: ОСА · КУЗНЕЦ · ПРИЗРАК',LW/2,118,0.85,'#a0d0ff','center');
+ drawText('НОВЫЕ ВРАГИ: СНАЙПЕР · ЩИТОНОСЕЦ · РОЙ',LW/2,136,0.8,'#ffa0a0','center');
+ drawText('ЯЩИКИ: G·M·R·H·A·S·$·+·L(ЛАЗЕР)',LW/2,156,0.75,'#ffd23f','center');
+ drawText('10 ПРЕГРАД ПОДРЯД = +500',LW/2,174,0.8,'#cfe8ff','center');
+ drawText('РЕКОРД: '+fmt(G.best),LW/2,LH-150,1.1,'#ffd23f','center');
+ const b={x:LW/2-90,y:LH-116,w:180,h:42};
+ drawBtn(b,'В БОЙ','#3a5a20','#c9d4a8');
+ G.menuBtn=b;
+ if(Math.floor(G.t*2)%2===0)drawText('M — ЗВУК',LW/2,LH-52,0.8,'#6a7460','center');
+}
+
+/* ============================================================
+   ЭКРАН СМЕРТИ
+   ============================================================ */
+function drawOver(){
+ bctx.fillStyle='rgba(12,14,10,0.88)';bctx.fillRect(0,0,LW,LH);
+ const pw=280,ph=176,px=(LW-pw)/2,py=LH*0.16;
+ drawPanel(px,py,pw,ph);
+ const isRec=G.score>=G.best&&G.score>0;
+ drawText(isRec?'НОВЫЙ РЕКОРД!':'ТАК ПОДБИТ',LW/2,py+16,1.5,isRec?'#ffd23f':'#ff6a6a','center');
+ drawText('СЧЁТ: '+fmt(G.score),LW/2,py+50,1.2,'#ffe9a8','center');
+ drawText('ВОЛНА: '+G.wave,LW/2,py+74,1,'#ffe9a8','center');
+ drawText('МИССИЯ: '+((G.mission-1)%3+1)+' '+missionName(G.mission),LW/2,py+96,0.9,'#ffe9a8','center');
+ drawText('РЕКОРД: '+fmt(G.best),LW/2,py+118,0.95,'#ffd23f','center');
+ const b={x:LW/2-80,y:py+ph-44,w:160,h:32};
+ drawBtn(b,'ЕЩЁ РАЗ','#3a5a20','#c9d4a8');
+ G.overBtn=b;
+}
+
+/* ============================================================
+   РЕНДЕР
+   ============================================================ */
+function render(){
+ bctx.setTransform(SCALE,0,0,SCALE,0,0);
+ bctx.clearRect(0,0,LW,LH);
+ if(G.shake>0)bctx.translate(Math.round((Math.random()-0.5)*G.shake),Math.round((Math.random()-0.5)*G.shake));
+
+ drawTerrain();
+ if(G.state==='menu'){drawDeco();drawMenu();blit();return;}
+ drawDeco();
+ drawObstacles();
+ drawCrates();
+ for(const e of G.enemies)drawEnemy(e);
+ if(G.boss)drawBoss();
+ drawBullets();
+ if(G.state!=='over')drawPlayerTank();
+ drawParticles();
+ bctx.setTransform(SCALE,0,0,SCALE,0,0);
+ if(G.flash>0){
+  bctx.fillStyle='rgba('+G.flashC+','+(G.flash*0.5).toFixed(3)+')';
+  bctx.fillRect(0,0,LW,LH);
+ }
+ if(G.state==='over')drawOver();
+ drawHUD();
+ blit();
+}
+function blit(){
+ ctx.fillStyle='#0a0e14';ctx.fillRect(0,0,cvs.width,cvs.height);
+ ctx.drawImage(buf,offX,offY);
+}
+// ===== ЧАСТЬ 7 КОНЕЦ =====
+/* ============================================================
+   УПРАВЛЕНИЕ
+   ============================================================ */
+function pt(e){
+ const r=cvs.getBoundingClientRect();
+ const dx=(e.clientX-r.left)*(cvs.width/r.width);
+ const dy=(e.clientY-r.top)*(cvs.height/r.height);
+ return{x:(dx-offX)/SCALE,y:(dy-offY)/SCALE};
+}
+function startFullscreen(){
+ try{if(document.documentElement.requestFullscreen)document.documentElement.requestFullscreen();}catch(err){}
+}
+function pressStart(p){
+ initAudio();
+ if(AC&&AC.state==='suspended')AC.resume();
+ if(G.state==='menu'){
+  if(p.x>=G.menuBtn.x&&p.x<=G.menuBtn.x+G.menuBtn.w&&p.y>=G.menuBtn.y&&p.y<=G.menuBtn.y+G.menuBtn.h){
+   startFullscreen();initDecor();reset();G.state='play';
+  }
+  return;
+ }
+ if(G.state==='over'){
+  if(p.x>=G.overBtn.x&&p.x<=G.overBtn.x+G.overBtn.w&&p.y>=G.overBtn.y&&p.y<=G.overBtn.y+G.overBtn.h){
+   startFullscreen();initDecor();reset();G.state='play';
+  }
+  return;
+ }
+ G.P.tx=clamp(p.x,18,LW-18);
+ G.P.ty=clamp(p.y-38,64,LH-42);
+ G.dragOn=true;
+}
+function pressMove(p){
+ if(G.state!=='play'||!G.dragOn)return;
+ G.P.tx=clamp(p.x,18,LW-18);
+ G.P.ty=clamp(p.y-38,64,LH-42);
+}
+function pressEnd(){G.dragOn=false;}
+
+/* Основной путь: Pointer Events (Android 4+, iOS 13+, десктоп) */
+cvs.addEventListener('pointerdown',function(e){e.preventDefault();pressStart(pt(e));});
+cvs.addEventListener('pointermove',function(e){e.preventDefault();pressMove(pt(e));});
+window.addEventListener('pointerup',pressEnd);
+window.addEventListener('pointercancel',pressEnd);
+
+/* Фолбэк: touch + mouse для старых iOS (<13) и Android без PointerEvents */
+if(!window.PointerEvent){
+ cvs.addEventListener('touchstart',function(e){e.preventDefault();if(e.touches.length)pressStart(pt(e.touches[0]));},{passive:false});
+ cvs.addEventListener('touchmove',function(e){e.preventDefault();if(e.touches.length)pressMove(pt(e.touches[0]));},{passive:false});
+ window.addEventListener('touchend',pressEnd);
+ window.addEventListener('touchcancel',pressEnd);
+ cvs.addEventListener('mousedown',function(e){pressStart(pt(e));});
+ window.addEventListener('mousemove',function(e){pressMove(pt(e));});
+ window.addEventListener('mouseup',pressEnd);
+}
+
+/* Пинч-зум в Safari (user-scalable=no он игнорирует) */
+document.addEventListener('gesturestart',function(e){e.preventDefault();});
+cvs.addEventListener('contextmenu',function(e){e.preventDefault();});
+
+/* Клавиатура (десктоп) */
+const keys={};
+window.addEventListener('keydown',function(e){
+ initAudio();
+ if(e.code==='KeyM'){G.muted=!G.muted;return;}
+ if((G.state==='menu'||G.state==='over')&&(e.code==='Space'||e.code==='Enter')){
+  startFullscreen();initDecor();reset();G.state='play';return;
+ }
+ keys[e.code]=true;
+});
+window.addEventListener('keyup',function(e){keys[e.code]=false;});
+
+function kbMove(dt){
+ const P=G.P,sp=120;let dx=0,dy=0;
+ if(keys.ArrowLeft||keys.KeyA)dx-=1;
+ if(keys.ArrowRight||keys.KeyD)dx+=1;
+ if(keys.ArrowUp||keys.KeyW)dy-=1;
+ if(keys.ArrowDown||keys.KeyS)dy+=1;
+ if(dx||dy){
+  P.x+=dx*sp*dt;P.y+=dy*sp*dt;
+  P.x=clamp(P.x,18,LW-18);P.y=clamp(P.y,64,LH-42);
+  P.tx=P.x;P.ty=P.y;
+ }
+}
+
+/* ============================================================
+   ИГРОВОЙ ЦИКЛ
+   ============================================================ */
+resize();
+initDecor();
+G.P.x=LW/2;G.P.y=LH*0.74;G.P.tx=G.P.x;G.P.ty=G.P.y;
+let last=performance.now();
+
+/* Пауза при сворачивании: аудио останавливаем, dt сбрасываем,
+   чтобы после возврата не было рывка и накопившихся нот */
+document.addEventListener('visibilitychange',function(){
+ if(document.hidden){if(AC)AC.suspend();}
+ else{
+  if(AC&&AC.state==='suspended')AC.resume();
+  last=performance.now();
+ }
+});
+
+function frame(now){
+ requestAnimationFrame(frame);
+ let dt=(now-last)/1000;last=now;
+ if(dt>0.06)dt=0.06;
+ G.t+=dt;
+ if(G.state==='play'){kbMove(dt);update(dt);moveDecor(dt);}
+ else moveDecor(dt);
+ render();
+}
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
+// ===== ЧАСТЬ 8 КОНЕЦ (ФАЙЛ ЗАВЕРШЁН) =====
